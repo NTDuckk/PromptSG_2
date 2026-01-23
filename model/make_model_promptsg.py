@@ -84,24 +84,36 @@ class PromptComposer(nn.Module):
     def _ensure_tokenization(self):
         if self.tokenized_composed is None:
             import model.clip.clip as clip_module
-            tokenized_composed = clip_module.tokenize(self.composed_str)
-            tokenized_simplified = clip_module.tokenize(self.simplified_str)
-            tokenized_x = clip_module.tokenize("X")
+
+            dev = self.token_embedding.weight.device  # <<< quan trọng
+
+            tokenized_composed = clip_module.tokenize(self.composed_str).to(dev)
+            tokenized_simplified = clip_module.tokenize(self.simplified_str).to(dev)
+
+            tokenized_x = clip_module.tokenize("X").to(dev)
             x_token_id = tokenized_x[0, 1].item()
+
             x_pos = (tokenized_composed[0] == x_token_id).nonzero(as_tuple=False)
             if x_pos.numel() == 0:
                 raise ValueError("Cannot locate placeholder token in composed prompt")
-            
-            self.tokenized_composed = tokenized_composed
-            self.tokenized_simplified = tokenized_simplified
+
+            self.register_buffer("tokenized_composed", tokenized_composed)
+            self.register_buffer("tokenized_simplified", tokenized_simplified)
             self.x_pos = int(x_pos[0].item())
 
     def _ensure_embeddings(self):
         self._ensure_tokenization()
         if self.embed_composed is None:
             with torch.no_grad():
-                self.embed_composed = self.token_embedding(self.tokenized_composed).type(self.dtype)
-                self.embed_simplified = self.token_embedding(self.tokenized_simplified).type(self.dtype)
+                # tokenized_* đã cùng device với token_embedding.weight rồi
+                embed_composed = self.token_embedding(self.tokenized_composed).type(self.dtype)
+                embed_simplified = self.token_embedding(self.tokenized_simplified).type(self.dtype)
+
+            self.register_buffer("embed_composed", embed_composed)
+            self.register_buffer("embed_simplified", embed_simplified)
+            self.embed_composed = embed_composed
+            self.embed_simplified = embed_simplified
+
 
     def forward(self, s_star: torch.Tensor):
         self._ensure_embeddings()

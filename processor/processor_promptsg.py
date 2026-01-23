@@ -22,7 +22,8 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
     logger.info("Config:\n{}".format(cfg.dump()))
 
     if device:
-        model.to(local_rank)
+        device = torch.device(f"cuda:{local_rank}") if local_rank is not None else torch.device("cuda")
+        model.to(device)
         if torch.cuda.device_count() > 1:
             model = nn.DataParallel(model)
 
