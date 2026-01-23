@@ -84,16 +84,21 @@ class PromptComposer(nn.Module):
             raise ValueError("Cannot locate placeholder token in composed prompt")
         self.x_pos = int(x_pos[0].item())
 
-        with torch.no_grad():
-            e_composed = self.token_embedding(tokenized_composed).type(self.dtype)
-            e_simplified = self.token_embedding(tokenized_simplified).type(self.dtype)
-
         self.register_buffer("tokenized_composed", tokenized_composed)
         self.register_buffer("tokenized_simplified", tokenized_simplified)
-        self.register_buffer("embed_composed", e_composed)
-        self.register_buffer("embed_simplified", e_simplified)
+        self.embed_composed = None
+        self.embed_simplified = None
+
+    def _ensure_embeddings(self):
+        if self.embed_composed is None:
+            with torch.no_grad():
+                self.embed_composed = self.token_embedding(self.tokenized_composed).type(self.dtype)
+                self.embed_simplified = self.token_embedding(self.tokenized_simplified).type(self.dtype)
+            self.register_buffer("embed_composed", self.embed_composed)
+            self.register_buffer("embed_simplified", self.embed_simplified)
 
     def forward(self, s_star: torch.Tensor):
+        self._ensure_embeddings()
         b = s_star.shape[0]
         if self.prompt_mode == 'simplified':
             tokenized = self.tokenized_simplified.expand(b, -1)
