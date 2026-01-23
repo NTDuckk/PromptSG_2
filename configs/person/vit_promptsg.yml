@@ -1,0 +1,54 @@
+MODEL:
+  NAME: 'ViT-B-16'
+  STRIDE_SIZE: [16, 16]
+  METRIC_LOSS_TYPE: 'triplet'
+  IF_LABELSMOOTH: 'on'
+  NO_MARGIN: False
+  PROMPTSG:
+    LAMBDA_SUPCON: 0.5
+    PROMPT_MODE: 'composed'
+    TEMPERATURE: 1.0
+    CROSS_ATTN_HEADS: 8
+    POST_CA_BLOCKS: 2
+
+INPUT:
+  SIZE_TRAIN: [256, 128]
+  SIZE_TEST: [256, 128]
+  PROB: 0.5
+  RE_PROB: 0.5
+  PADDING: 10
+  PIXEL_MEAN: [0.5, 0.5, 0.5]
+  PIXEL_STD: [0.5, 0.5, 0.5]
+
+DATALOADER:
+  SAMPLER: 'softmax_triplet'
+  NUM_INSTANCE: 4
+  NUM_WORKERS: 8
+
+SOLVER:
+  SEED: 1234
+  MARGIN: 0.3
+  PROMPTSG:
+    IMS_PER_BATCH: 64
+    OPTIMIZER_NAME: 'Adam'
+    MAX_EPOCHS: 60
+    BASE_LR_VISUAL: 0.000005
+    BASE_LR_NEW: 0.00005
+    WEIGHT_DECAY: 0.0001
+    STEPS: [20, 40]
+    GAMMA: 0.1
+    CHECKPOINT_PERIOD: 60
+    LOG_PERIOD: 50
+    EVAL_PERIOD: 60
+
+TEST:
+  IMS_PER_BATCH: 64
+  RE_RANKING: False
+  WEIGHT: ''
+  NECK_FEAT: 'before'
+  FEAT_NORM: 'yes'
+
+DATASETS:
+  NAMES: ('market1501')
+  ROOT_DIR: datasets/dataset
+OUTPUT_DIR: ('logs/promptsg_market_vit/')
