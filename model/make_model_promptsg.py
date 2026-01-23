@@ -166,12 +166,14 @@ class PromptSGModel(nn.Module):
         self.classifier = nn.Linear(512, num_classes, bias=False)
         self.classifier.apply(weights_init_classifier)
 
-        with torch.no_grad():
-            dummy = torch.zeros(1, 512)
-            prompts, tokenized = self.prompt_composer(dummy)
-            prompts = prompts.to(device=cfg.MODEL.DEVICE)
-            tokenized = tokenized.to(device=cfg.MODEL.DEVICE)
-            self.register_buffer("_text_feat_cached", self.text_encoder(prompts, tokenized).detach().cpu())
+        self._text_feat_cached = None
+
+    def _ensure_text_features(self):
+        if self._text_feat_cached is None:
+            with torch.no_grad():
+                dummy = torch.zeros(1, 512, device=next(self.parameters()).device)
+                prompts, tokenized = self.prompt_composer(dummy)
+                self._text_feat_cached = self.text_encoder(prompts, tokenized).detach().cpu()
 
     def forward(self, x, label=None):
         x10, x11, x12, xproj = self.image_encoder(x, return_intermediate=True)
@@ -180,6 +182,7 @@ class PromptSGModel(nn.Module):
         patches = xproj[:, 1:]
 
         if self.prompt_mode == 'simplified':
+            self._ensure_text_features()
             text_feat = self._text_feat_cached.to(device=x.device).expand(x.shape[0], -1)
         else:
             s_star = self.inversion(v)
