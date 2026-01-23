@@ -95,11 +95,6 @@ class PromptComposer(nn.Module):
             self.tokenized_composed = tokenized_composed
             self.tokenized_simplified = tokenized_simplified
             self.x_pos = int(x_pos[0].item())
-            
-            # Only register if not already registered
-            if not hasattr(self, 'tokenized_composed_buffer'):
-                self.register_buffer("tokenized_composed", self.tokenized_composed)
-                self.register_buffer("tokenized_simplified", self.tokenized_simplified)
 
     def _ensure_embeddings(self):
         self._ensure_tokenization()
@@ -107,11 +102,6 @@ class PromptComposer(nn.Module):
             with torch.no_grad():
                 self.embed_composed = self.token_embedding(self.tokenized_composed).type(self.dtype)
                 self.embed_simplified = self.token_embedding(self.tokenized_simplified).type(self.dtype)
-            
-            # Only register if not already registered
-            if not hasattr(self, 'embed_composed_buffer'):
-                self.register_buffer("embed_composed", self.embed_composed)
-                self.register_buffer("embed_simplified", self.embed_simplified)
 
     def forward(self, s_star: torch.Tensor):
         self._ensure_embeddings()
