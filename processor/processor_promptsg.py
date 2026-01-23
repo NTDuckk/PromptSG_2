@@ -1,14 +1,13 @@
 import logging
 import os
 import time
-
 import torch
 import torch.nn as nn
 from torch.cuda import amp
-
 from utils.meter import AverageMeter
 from utils.metrics import R1_mAP_eval
-
+import torch.distributed as dist
+from torch.nn import functional as F
 
 def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn, num_query, local_rank):
     log_period = cfg.SOLVER.PROMPTSG.LOG_PERIOD
@@ -20,6 +19,7 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
 
     logger = logging.getLogger("promptsg.train")
     logger.info('start training')
+    logger.info("Config:\n{}".format(cfg.dump()))
 
     if device:
         model.to(local_rank)
@@ -42,6 +42,7 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
         loss_meter.reset(); acc_meter.reset(); evaluator.reset()
         id_meter.reset(); tri_meter.reset(); supcon_meter.reset()
 
+        logger.info("Epoch {} started".format(epoch))
         scheduler.step()
         model.train()
 
@@ -77,30 +78,52 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
                         scheduler.get_lr()[0] if hasattr(scheduler, 'get_lr') else optimizer.param_groups[0]['lr']
                     )
                 )
-
-        time_per_batch = (time.time() - start_time) / (n_iter + 1)
-        logger.info(
-            "Epoch {} done. Time per batch: {:.3f}[s] Speed: {:.1f}[samples/s]".format(
-                epoch, time_per_batch, train_loader.batch_size / time_per_batch
-            )
-        )
+        end_time = time.time()
+        time_per_batch = (end_time - start_time) / (n_iter + 1)
+        if cfg.MODEL.DIST_TRAIN:
+            pass
+        else:
+            logger.info("Epoch {} done. Time per batch: {:.3f}[s] Speed: {:.1f}[samples/s]".format(epoch, time_per_batch, train_loader.batch_size / time_per_batch))
 
         if epoch % checkpoint_period == 0:
-            torch.save(model.state_dict(), os.path.join(cfg.OUTPUT_DIR, cfg.MODEL.NAME + '_promptsg_{}.pth'.format(epoch)))
+            if cfg.MODEL.DIST_TRAIN:
+                if dist.get_rank() == 0:
+                    torch.save(model.state_dict(),
+                               os.path.join(cfg.OUTPUT_DIR, cfg.MODEL.NAME + '_{}.pth'.format(epoch)))
+            else:
+                torch.save(model.state_dict(),
+                           os.path.join(cfg.OUTPUT_DIR, cfg.MODEL.NAME + '_{}.pth'.format(epoch)))
 
         if epoch % eval_period == 0:
-            model.eval()
-            for n_iter, (img, pid, camid, camids, viewid, _) in enumerate(val_loader):
-                with torch.no_grad():
-                    img = img.to(device)
-                    feat = model(img)
-                    evaluator.update((feat, pid, camid))
-            cmc, mAP, _, _, _, _, _ = evaluator.compute()
-            logger.info("Validation Results - Epoch: {}".format(epoch))
-            logger.info("mAP: {:.1%}".format(mAP))
-            for r in [1, 5, 10]:
-                logger.info("CMC curve, Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
-            torch.cuda.empty_cache()
+            if cfg.MODEL.DIST_TRAIN:
+                if dist.get_rank() == 0:
+                    model.eval()
+                    for n_iter, (img, pid, camid, viewid) in enumerate(val_loader):
+                        with torch.no_grad():
+                            img = img.to(device)
+                            feat = model(img)
+                            evaluator.update((feat, pid, camid))
+                    cmc, mAP, _, _, _, _, _ = evaluator.compute()
+                    logger.info("Validation Results - Epoch {}".format(epoch))
+                    logger.info("mAP: {:.1%}".format(mAP))
+                    for r in [1, 5, 10]:
+                        logger.info("Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
+                    torch.cuda.empty_cache()
+            else:
+                model.eval()
+                evaluator = R1_mAP_eval(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
+                evaluator.reset()
+                for n_iter, (img, pid, camid, viewid) in enumerate(val_loader):
+                    with torch.no_grad():
+                        img = img.to(device)
+                        feat = model(img)
+                        evaluator.update((feat, pid, camid))
+                cmc, mAP, _, _, _, _, _ = evaluator.compute()
+                logger.info("Validation Results - Epoch {}".format(epoch))
+                logger.info("mAP: {:.1%}".format(mAP))
+                for r in [1, 5, 10]:
+                    logger.info("Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
+                torch.cuda.empty_cache()
 
     total_time = time.monotonic() - all_start_time
     logger.info("Total running time: {:.1f}[s]".format(total_time))
@@ -121,7 +144,7 @@ def do_inference(cfg, model, val_loader, num_query):
 
     model.eval()
 
-    for n_iter, (img, pid, camid, camids, viewid, imgpath) in enumerate(val_loader):
+    for n_iter, (img, pid, camid, viewid) in enumerate(val_loader):
         with torch.no_grad():
             img = img.to(device)
             feat = model(img)
@@ -131,5 +154,5 @@ def do_inference(cfg, model, val_loader, num_query):
     logger.info("Validation Results")
     logger.info("mAP: {:.1%}".format(mAP))
     for r in [1, 5, 10]:
-        logger.info("CMC curve, Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
+        logger.info("Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
     return cmc[0], cmc[4], mAP
