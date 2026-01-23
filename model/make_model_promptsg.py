@@ -72,24 +72,32 @@ class PromptComposer(nn.Module):
         self.token_embedding = clip_model.token_embedding
         self.dtype = clip_model.dtype
 
-        composed_str = "A photo of a X person."
-        simplified_str = "A photo of a person."
-
-        tokenized_composed = clip.tokenize(composed_str)
-        tokenized_simplified = clip.tokenize(simplified_str)
-        tokenized_x = clip.tokenize("X")
-        x_token_id = tokenized_x[0, 1].item()
-        x_pos = (tokenized_composed[0] == x_token_id).nonzero(as_tuple=False)
-        if x_pos.numel() == 0:
-            raise ValueError("Cannot locate placeholder token in composed prompt")
-        self.x_pos = int(x_pos[0].item())
-
-        self.register_buffer("tokenized_composed", tokenized_composed)
-        self.register_buffer("tokenized_simplified", tokenized_simplified)
+        self.composed_str = "A photo of a X person."
+        self.simplified_str = "A photo of a person."
+        
+        self.tokenized_composed = None
+        self.tokenized_simplified = None
         self.embed_composed = None
         self.embed_simplified = None
+        self.x_pos = None
+
+    def _ensure_tokenization(self):
+        if self.tokenized_composed is None:
+            import model.clip.clip as clip_module
+            tokenized_composed = clip_module.tokenize(self.composed_str)
+            tokenized_simplified = clip_module.tokenize(self.simplified_str)
+            tokenized_x = clip_module.tokenize("X")
+            x_token_id = tokenized_x[0, 1].item()
+            x_pos = (tokenized_composed[0] == x_token_id).nonzero(as_tuple=False)
+            if x_pos.numel() == 0:
+                raise ValueError("Cannot locate placeholder token in composed prompt")
+            
+            self.register_buffer("tokenized_composed", tokenized_composed)
+            self.register_buffer("tokenized_simplified", tokenized_simplified)
+            self.x_pos = int(x_pos[0].item())
 
     def _ensure_embeddings(self):
+        self._ensure_tokenization()
         if self.embed_composed is None:
             with torch.no_grad():
                 self.embed_composed = self.token_embedding(self.tokenized_composed).type(self.dtype)
