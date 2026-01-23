@@ -99,7 +99,7 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
             if cfg.MODEL.DIST_TRAIN:
                 if dist.get_rank() == 0:
                     model.eval()
-                    for n_iter, (img, pid, camid, viewid) in enumerate(val_loader):
+                    for n_iter, (img, pid, camid, camids_batch, viewid, img_path) in enumerate(val_loader):
                         with torch.no_grad():
                             img = img.to(device)
                             feat = model(img)
@@ -114,7 +114,7 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
                 model.eval()
                 evaluator = R1_mAP_eval(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
                 evaluator.reset()
-                for n_iter, (img, pid, camid, viewid) in enumerate(val_loader):
+                for n_iter, (img, pid, camid, camids_batch, viewid, img_path) in enumerate(val_loader):
                     with torch.no_grad():
                         img = img.to(device)
                         feat = model(img)
@@ -145,7 +145,7 @@ def do_inference(cfg, model, val_loader, num_query):
 
     model.eval()
 
-    for n_iter, (img, pid, camid, viewid) in enumerate(val_loader):
+    for n_iter, (img, pid, camid, camid_batch, viewid, img_path) in enumerate(val_loader):
         with torch.no_grad():
             img = img.to(device)
             feat = model(img)
