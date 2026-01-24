@@ -143,7 +143,6 @@ class CrossAttentionGuidance(nn.Module):
         w = weights.mean(dim=1).squeeze(1).squeeze(1)
         return out.squeeze(1), w
 
-
 class PromptSGModel(nn.Module):
     def __init__(self, num_classes, cfg):
         super().__init__()
@@ -219,12 +218,12 @@ class PromptSGModel(nn.Module):
 
         x10p = (self.image_encoder.ln_post(x10) @ self.image_encoder.proj)[:, 0]
         x11p = (self.image_encoder.ln_post(x11) @ self.image_encoder.proj)[:, 0]
-
+        x12p = (self.image_encoder.ln_post(x12) @ self.image_encoder.proj)[:, 0]
         feat_bn = self.bottleneck(v_final)
 
         if self.training:
             cls_score = self.classifier(feat_bn)
-            return cls_score, [x10p, x11p, v_final], v_final, text_feat
+            return cls_score, [x10p, x11p, x12p, v_final], v_final, text_feat
 
         return v_final
 

@@ -26,7 +26,9 @@ def make_loss(cfg, num_classes):
             id_loss = F.cross_entropy(cls_score, target)
 
         if isinstance(triplet_feats, (list, tuple)):
-            tri_loss = sum(triplet(f, target)[0] for f in triplet_feats)
+            # tri_loss = sum(triplet(f, target)[0] for f in triplet_feats)
+            weights = [0.3, 0.3, 0.4]
+            tri_loss = sum(w * triplet(f, target)[0] for w, f in zip(weights, triplet_feats))
         else:
             tri_loss = triplet(triplet_feats, target)[0]
 

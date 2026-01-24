@@ -9,6 +9,31 @@ from utils.metrics import R1_mAP_eval
 import torch.distributed as dist
 from torch.nn import functional as F
 
+def setup_training_logger(cfg):
+    """Setup additional file logger for training metrics"""
+    # Create logs directory if not exists
+    log_dir = cfg.OUTPUT_DIR
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # Setup file logger for metrics
+    metrics_logger = logging.getLogger("promptsg.metrics")
+    metrics_logger.setLevel(logging.INFO)
+    
+    # File handler for metrics
+    metrics_file = os.path.join(log_dir, 'training_metrics.txt')
+    file_handler = logging.FileHandler(metrics_file, mode='w')
+    file_handler.setLevel(logging.INFO)
+    
+    # Formatter
+    formatter = logging.Formatter('%(asctime)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    
+    # Add handler to logger
+    if not metrics_logger.handlers:
+        metrics_logger.addHandler(file_handler)
+    
+    return metrics_logger
+
 def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn, num_query, local_rank):
     log_period = cfg.SOLVER.PROMPTSG.LOG_PERIOD
     checkpoint_period = cfg.SOLVER.PROMPTSG.CHECKPOINT_PERIOD
@@ -21,11 +46,29 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
     logger.info('start training')
     logger.info("Config:\n{}".format(cfg.dump()))
 
+    # Setup metrics file logger
+    metrics_logger = setup_training_logger(cfg)
+    metrics_logger.info("=== TRAINING STARTED ===")
+    metrics_logger.info(f"Model: {cfg.MODEL.NAME}")
+    metrics_logger.info(f"Prompt mode: {cfg.MODEL.PROMPTSG.PROMPT_MODE}")
+    metrics_logger.info(f"Max epochs: {epochs}")
+    metrics_logger.info(f"Learning rate: {cfg.SOLVER.PROMPTSG.BASE_LR_VISUAL}")
+    metrics_logger.info("="*50)
+
     if device:
         device = torch.device(f"cuda:{local_rank}") if local_rank is not None else torch.device("cuda")
         model.to(device)
         if torch.cuda.device_count() > 1:
             model = nn.DataParallel(model)
+
+    # ============ DEBUG: Log model info ============
+    logger.info(f"Model name: {cfg.MODEL.NAME}")
+    logger.info(f"Prompt mode: {cfg.MODEL.PROMPTSG.PROMPT_MODE}")
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"Total parameters: {total_params:,}")
+    logger.info(f"Trainable parameters: {trainable_params:,}")
+    # ============ END DEBUG ============
 
     loss_meter = AverageMeter()
     acc_meter = AverageMeter()
@@ -44,6 +87,7 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
         id_meter.reset(); tri_meter.reset(); supcon_meter.reset()
 
         logger.info("Epoch {} started".format(epoch))
+        metrics_logger.info(f"EPOCH {epoch} - Training started")
         scheduler.step()
         model.train()
 
@@ -54,7 +98,40 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
 
             with amp.autocast(enabled=True):
                 cls_score, triplet_feats, image_feat, text_feat = model(img, target)
+                
+                # ============ DEBUG: Check model outputs ============
+                if epoch == 1 and n_iter == 0:
+                    logger.info("=== DEBUG: Model Outputs ===")
+                    logger.info(f"cls_score shape: {cls_score.shape}")
+                    logger.info(f"triplet_feats type: {type(triplet_feats)}")
+                    if isinstance(triplet_feats, (list, tuple)):
+                        logger.info(f"Number of triplet features: {len(triplet_feats)}")
+                        for i, feat in enumerate(triplet_feats):
+                            logger.info(f"  triplet_feats[{i}] shape: {feat.shape}")
+                            logger.info(f"  triplet_feats[{i}] min/max: {feat.min().item():.4f}/{feat.max().item():.4f}")
+                    else:
+                        logger.info(f"triplet_feats shape: {triplet_feats.shape}")
+                    logger.info(f"image_feat shape: {image_feat.shape}")
+                    logger.info(f"text_feat shape: {text_feat.shape}")
+                    logger.info(f"target shape: {target.shape}")
+                    logger.info(f"Batch size: {img.shape[0]}")
+                    logger.info("===========================")
+                # ============ END DEBUG ============
+
                 loss, id_loss, tri_loss, supcon_loss = loss_fn(cls_score, triplet_feats, image_feat, text_feat, target)
+                
+                # ============ DEBUG: Check loss values ============
+                if epoch == 1 and n_iter == 0:
+                    logger.info("=== DEBUG: Loss Values ===")
+                    logger.info(f"Total loss: {loss.item():.6f}")
+                    logger.info(f"ID loss: {id_loss.item():.6f}")
+                    logger.info(f"Triplet loss: {tri_loss.item():.6f}")
+                    logger.info(f"SupCon loss: {supcon_loss.item():.6f}")
+                    logger.info(f"Lambda SupCon: {cfg.MODEL.PROMPTSG.LAMBDA_SUPCON if hasattr(cfg.MODEL.PROMPTSG, 'LAMBDA_SUPCON') else 'N/A'}")
+                    logger.info(f"Lambda Triplet: {cfg.MODEL.PROMPTSG.LAMBDA_TRIPLET if hasattr(cfg.MODEL.PROMPTSG, 'LAMBDA_TRIPLET') else 'N/A'}")
+                    logger.info(f"Lambda ID: {cfg.MODEL.PROMPTSG.LAMBDA_ID if hasattr(cfg.MODEL.PROMPTSG, 'LAMBDA_ID') else 'N/A'}")
+                    logger.info("==========================")
+                # ============ END DEBUG ============
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -71,20 +148,22 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
 
             torch.cuda.synchronize()
             if (n_iter + 1) % log_period == 0:
-                logger.info(
-                    "Epoch[{}] Iteration[{}/{}] Loss: {:.3f} (ID {:.3f} TRI {:.3f} SupCon {:.3f}) Acc: {:.3f} Lr: {:.2e}".format(
-                        epoch, n_iter + 1, len(train_loader),
-                        loss_meter.avg, id_meter.avg, tri_meter.avg, supcon_meter.avg,
-                        acc_meter.avg,
-                        scheduler.get_lr()[0] if hasattr(scheduler, 'get_lr') else optimizer.param_groups[0]['lr']
-                    )
-                )
+                log_msg = ("Epoch[{}] Iteration[{}/{}] Loss: {:.3f} (ID {:.3f} TRI {:.3f} SupCon {:.3f}) Acc: {:.3f} Lr: {:.2e}".format(
+                    epoch, n_iter + 1, len(train_loader),
+                    loss_meter.avg, id_meter.avg, tri_meter.avg, supcon_meter.avg,
+                    acc_meter.avg,
+                    scheduler.get_lr()[0] if hasattr(scheduler, 'get_lr') else optimizer.param_groups[0]['lr']
+                ))
+                logger.info(log_msg)
+                metrics_logger.info(log_msg)
         end_time = time.time()
         time_per_batch = (end_time - start_time) / (n_iter + 1)
         if cfg.MODEL.DIST_TRAIN:
             pass
         else:
-            logger.info("Epoch {} done. Time per batch: {:.3f}[s] Speed: {:.1f}[samples/s]".format(epoch, time_per_batch, train_loader.batch_size / time_per_batch))
+            epoch_msg = "Epoch {} done. Time per batch: {:.3f}[s] Speed: {:.1f}[samples/s]".format(epoch, time_per_batch, train_loader.batch_size / time_per_batch)
+            logger.info(epoch_msg)
+            metrics_logger.info(epoch_msg)
 
         if epoch % checkpoint_period == 0:
             if cfg.MODEL.DIST_TRAIN:
@@ -105,10 +184,16 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
                             feat = model(img)
                             evaluator.update((feat, pid, camid))
                     cmc, mAP, _, _, _, _, _ = evaluator.compute()
-                    logger.info("Validation Results - Epoch {}".format(epoch))
-                    logger.info("mAP: {:.1%}".format(mAP))
+                    val_msg = "Validation Results - Epoch {}".format(epoch)
+                    logger.info(val_msg)
+                    metrics_logger.info(val_msg)
+                    map_msg = "mAP: {:.1%}".format(mAP)
+                    logger.info(map_msg)
+                    metrics_logger.info(map_msg)
                     for r in [1, 5, 10]:
-                        logger.info("Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
+                        rank_msg = "Rank-{:<3}:{:.1%}".format(r, cmc[r - 1])
+                        logger.info(rank_msg)
+                        metrics_logger.info(rank_msg)
                     torch.cuda.empty_cache()
             else:
                 model.eval()
@@ -120,14 +205,25 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
                         feat = model(img)
                         evaluator.update((feat, pid, camid))
                 cmc, mAP, _, _, _, _, _ = evaluator.compute()
-                logger.info("Validation Results - Epoch {}".format(epoch))
-                logger.info("mAP: {:.1%}".format(mAP))
+                val_msg = "Validation Results - Epoch {}".format(epoch)
+                logger.info(val_msg)
+                metrics_logger.info(val_msg)
+                map_msg = "mAP: {:.1%}".format(mAP)
+                logger.info(map_msg)
+                metrics_logger.info(map_msg)
                 for r in [1, 5, 10]:
-                    logger.info("Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
+                    rank_msg = "Rank-{:<3}:{:.1%}".format(r, cmc[r - 1])
+                    logger.info(rank_msg)
+                    metrics_logger.info(rank_msg)
                 torch.cuda.empty_cache()
 
     total_time = time.monotonic() - all_start_time
-    logger.info("Total running time: {:.1f}[s]".format(total_time))
+    time_msg = "Total running time: {:.1f}[s]".format(total_time)
+    logger.info(time_msg)
+    metrics_logger.info("="*50)
+    metrics_logger.info("=== TRAINING COMPLETED ===")
+    metrics_logger.info(time_msg)
+    metrics_logger.info("="*50)
 
 
 def do_inference(cfg, model, val_loader, num_query):

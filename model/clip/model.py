@@ -52,7 +52,6 @@ class Bottleneck(nn.Module):
         out = self.relu(out)
         return out
 
-
 class AttentionPool2d(nn.Module):
     def __init__(self, spacial_dim: int, embed_dim: int, num_heads: int, output_dim: int = None):
         super().__init__()
