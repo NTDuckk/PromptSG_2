@@ -8,6 +8,8 @@ from utils.meter import AverageMeter
 from utils.metrics import R1_mAP_eval
 import torch.distributed as dist
 from torch.nn import functional as F
+import subprocess
+import sys
 
 def setup_training_logger(cfg):
     """Setup additional file logger for training metrics"""
@@ -33,6 +35,58 @@ def setup_training_logger(cfg):
         metrics_logger.addHandler(file_handler)
     
     return metrics_logger
+
+def auto_generate_plots(cfg):
+    """Automatically generate learning curves after training completion"""
+    logger = logging.getLogger("promptsg.train")
+    logger.info("Generating learning curves...")
+    
+    try:
+        # Get the script directory and plot script path
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(current_dir)
+        plot_script = os.path.join(project_root, 'plot_learning_curves.py')
+        
+        if not os.path.exists(plot_script):
+            logger.warning(f"Plot script not found at {plot_script}")
+            return False
+        
+        # Prepare command
+        cmd = [
+            sys.executable,  # Use current Python interpreter
+            plot_script,
+            '--log_dir', cfg.OUTPUT_DIR,
+            '--output_dir', os.path.join(project_root, 'plots'),
+            '--save_json'
+        ]
+        
+        logger.info(f"Running command: {' '.join(cmd)}")
+        
+        # Run the plot script
+        result = subprocess.run(
+            cmd,
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 minutes timeout
+        )
+        
+        if result.returncode == 0:
+            logger.info("Learning curves generated successfully!")
+            logger.info(f"Output: {result.stdout}")
+            if result.stderr:
+                logger.info(f"Warnings: {result.stderr}")
+            return True
+        else:
+            logger.error(f"Failed to generate learning curves: {result.stderr}")
+            return False
+            
+    except subprocess.TimeoutExpired:
+        logger.error("Plot generation timed out after 5 minutes")
+        return False
+    except Exception as e:
+        logger.error(f"Error generating plots: {str(e)}")
+        return False
 
 def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn, num_query, local_rank):
     log_period = cfg.SOLVER.PROMPTSG.LOG_PERIOD
@@ -88,7 +142,6 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
 
         logger.info("Epoch {} started".format(epoch))
         metrics_logger.info(f"EPOCH {epoch} - Training started")
-        scheduler.step()
         model.train()
 
         for n_iter, (img, pid, camid, viewid) in enumerate(train_loader):
@@ -134,6 +187,11 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
                 # ============ END DEBUG ============
 
             scaler.scale(loss).backward()
+
+            # Gradient clipping for stability
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
             scaler.step(optimizer)
             scaler.update()
 
@@ -164,6 +222,9 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
             epoch_msg = "Epoch {} done. Time per batch: {:.3f}[s] Speed: {:.1f}[samples/s]".format(epoch, time_per_batch, train_loader.batch_size / time_per_batch)
             logger.info(epoch_msg)
             metrics_logger.info(epoch_msg)
+
+        # Step scheduler AFTER epoch (not before)
+        scheduler.step()
 
         if epoch % checkpoint_period == 0:
             if cfg.MODEL.DIST_TRAIN:
@@ -224,6 +285,19 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
     metrics_logger.info("=== TRAINING COMPLETED ===")
     metrics_logger.info(time_msg)
     metrics_logger.info("="*50)
+
+    # Auto-generate learning curves
+    if not cfg.MODEL.DIST_TRAIN or (cfg.MODEL.DIST_TRAIN and dist.get_rank() == 0):
+        logger.info("Training completed. Auto-generating learning curves...")
+        success = auto_generate_plots(cfg)
+        if success:
+            logger.info(" Training completed successfully! Check 'plots/' directory for learning curves.")
+        else:
+            logger.warning("  Plot generation failed. You can manually run: python plot_learning_curves.py")
+    else:
+        logger.info("Training completed. Plot generation skipped for distributed training.")
+
+    return
 
 
 def do_inference(cfg, model, val_loader, num_query):

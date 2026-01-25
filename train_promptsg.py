@@ -66,12 +66,24 @@ if __name__ == '__main__':
 
     optimizer = make_optimizer(cfg, model)
 
+    # Get warmup settings from config (with defaults)
+    warmup_epochs = getattr(cfg.SOLVER.PROMPTSG, 'WARMUP_EPOCHS', 0)
+    warmup_lr_init = getattr(cfg.SOLVER.PROMPTSG, 'WARMUP_LR_INIT', 0.0)
+
+    if warmup_epochs > 0 and warmup_lr_init > 0:
+        warmup_iters = warmup_epochs
+        warmup_factor = warmup_lr_init / cfg.SOLVER.PROMPTSG.BASE_LR_NEW
+        warmup_factor = min(1.0, max(0.0, warmup_factor))
+    else:
+        warmup_iters = 0
+        warmup_factor = 1.0
+
     scheduler = WarmupMultiStepLR(
         optimizer,
         cfg.SOLVER.PROMPTSG.STEPS,
         cfg.SOLVER.PROMPTSG.GAMMA,
-        warmup_factor=1.0,
-        warmup_iters=0,
+        warmup_factor=warmup_factor,
+        warmup_iters=warmup_iters,
         warmup_method='linear',
     )
 
