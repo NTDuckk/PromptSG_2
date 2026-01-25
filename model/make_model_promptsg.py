@@ -1,6 +1,7 @@
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .clip import clip
 
@@ -44,7 +45,10 @@ class TextEncoder(nn.Module):
         x = self.transformer(x)
         x = x.permute(1, 0, 2)
         x = self.ln_final(x).type(self.dtype)
-        x = x[torch.arange(x.shape[0], device=x.device), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
+        # Explicit EOT position lookup (more robust than argmax)
+        EOT_TOKEN_ID = 49407
+        eot_indices = (tokenized_prompts == EOT_TOKEN_ID).int().argmax(dim=-1)
+        x = x[torch.arange(x.shape[0], device=x.device), eot_indices] @ self.text_projection
         return x
 
 
@@ -209,15 +213,17 @@ class PromptSGModel(nn.Module):
             with torch.no_grad():
                 text_feat = self.text_encoder(prompts, tokenized)
 
-        _, patch_weights = self.cross_guidance(text_feat, patches)
+        ca_out, patch_weights = self.cross_guidance(text_feat, patches)
         patches = patches * patch_weights.unsqueeze(-1)
 
-        seq = torch.cat([xproj[:, :1], patches], dim=1)
+        # Use cross-attention output as additional context token (Paper Eq. 7)
+        seq = torch.cat([ca_out.unsqueeze(1), xproj[:, :1], patches], dim=1)
         seq = self.post_blocks(seq)
-        v_final = seq[:, 0]
+        v_final = seq[:, 1]  # CLS token now at index 1 (index 0 is CA output)
 
-        x10p = (self.image_encoder.ln_post(x10) @ self.image_encoder.proj)[:, 0]
-        x11p = (self.image_encoder.ln_post(x11) @ self.image_encoder.proj)[:, 0]
+        # Normalize intermediate features directly (ln_post/proj calibrated for final layer only)
+        x10p = F.normalize(x10[:, 0], dim=-1)
+        x11p = F.normalize(x11[:, 0], dim=-1)
         x12p = (self.image_encoder.ln_post(x12) @ self.image_encoder.proj)[:, 0]
         feat_bn = self.bottleneck(v_final)
 
