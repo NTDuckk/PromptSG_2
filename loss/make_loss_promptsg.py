@@ -20,10 +20,13 @@ def make_loss(cfg, num_classes):
     supcon = SupConLoss(device=cfg.MODEL.DEVICE, temperature=cfg.MODEL.PROMPTSG.TEMPERATURE)
 
     def loss_func(cls_score, triplet_feats, image_feat, text_feat, target):
+        # Handle cls_score as list/tuple - use first element for ID loss
+        main_cls_score = cls_score[0] if isinstance(cls_score, (list, tuple)) else cls_score
+        
         if xent is not None:
-            id_loss = xent(cls_score, target)
+            id_loss = xent(main_cls_score, target)
         else:
-            id_loss = F.cross_entropy(cls_score, target)
+            id_loss = F.cross_entropy(main_cls_score, target)
 
         if isinstance(triplet_feats, (list, tuple)):
             # tri_loss = sum(triplet(f, target)[0] for f in triplet_feats)
