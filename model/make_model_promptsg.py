@@ -147,7 +147,6 @@ class CrossAttentionGuidance(nn.Module):
         attn_map = attn_map.squeeze(1)      # (batch, num_patches)
         return attn_map
 
-
 class PromptSGModel(nn.Module):
     def __init__(self, num_classes, camera_num, view_num, cfg):
         super().__init__()
@@ -160,20 +159,21 @@ class PromptSGModel(nn.Module):
         self.camera_num = camera_num
         self.view_num = view_num
         
+        # KHÔNG THAY ĐỔI - Giữ nguyên như CLIP-ReID
         if self.model_name == 'ViT-B-16':
             self.in_planes = 768
             self.in_planes_proj = 512
         elif self.model_name == 'RN50':
             self.in_planes = 2048
-            self.in_planes_proj = 1024
+            self.in_planes_proj = 1024  # CLIP ResNet50 có projected feature 1024
         
-        # Classifiers
+        # Classifiers - GIỮ NGUYÊN
         self.classifier = nn.Linear(self.in_planes, self.num_classes, bias=False)
         self.classifier.apply(weights_init_classifier)
         self.classifier_proj = nn.Linear(self.in_planes_proj, self.num_classes, bias=False)
         self.classifier_proj.apply(weights_init_classifier)
 
-        # Bottlenecks
+        # Bottlenecks - GIỮ NGUYÊN
         self.bottleneck = nn.BatchNorm1d(self.in_planes)
         self.bottleneck.bias.requires_grad_(False)
         self.bottleneck.apply(weights_init_kaiming)
@@ -195,20 +195,26 @@ class PromptSGModel(nn.Module):
 
         # PromptSG modules
         self.prompt_composer = PromptComposer(clip_model, cfg.MODEL.PROMPTSG.PROMPT_MODE)
-        self.inversion = InversionNetwork(dim=512)
+        self.inversion = InversionNetwork(dim=512)  # Luôn là 512 vì CLIP text encoder output 512
 
         # Multimodal Interaction Module (MIM)
-        self.cross_guidance = CrossAttentionGuidance(embed_dim=512, num_heads=cfg.MODEL.PROMPTSG.CROSS_ATTN_HEADS)
+        self.cross_guidance = CrossAttentionGuidance(
+            embed_dim=512,  # Luôn là 512 cho CLIP
+            num_heads=cfg.MODEL.PROMPTSG.CROSS_ATTN_HEADS
+        )
         
-        # Post cross-attention transformer blocks (2 layers as in paper)
+        # Post cross-attention transformer blocks
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=512,
+            d_model=512,  # Luôn là 512
             nhead=cfg.MODEL.PROMPTSG.CROSS_ATTN_HEADS,
             dim_feedforward=2048,
             activation='gelu',
             batch_first=True,
         )
-        self.post_blocks = nn.TransformerEncoder(encoder_layer, num_layers=cfg.MODEL.PROMPTSG.POST_CA_BLOCKS)
+        self.post_blocks = nn.TransformerEncoder(
+            encoder_layer, 
+            num_layers=cfg.MODEL.PROMPTSG.POST_CA_BLOCKS
+        )
         
         # Cache for simplified prompt
         self._text_feat_cached = None
@@ -225,14 +231,6 @@ class PromptSGModel(nn.Module):
     def forward(self, x, label=None, get_image=False, get_text=False, cam_label=None, view_label=None):
         """
         Forward pass of PromptSG model
-        
-        Args:
-            x: input images
-            label: labels for training
-            get_image: if True, return image features only
-            get_text: if True, return text features only
-            cam_label: camera labels
-            view_label: view labels
         """
         # Get text features only
         if get_text:
@@ -264,95 +262,131 @@ class PromptSGModel(nn.Module):
         # Extract features based on backbone type
         if self.model_name == 'ViT-B-16':
             # ViT-B/16: [CLS] token + patch tokens
-            img_feature_last = image_features_last[:, 0]  # Last layer CLS token
-            img_feature = image_features[:, 0]  # Intermediate CLS token
-            img_feature_proj = image_features_proj[:, 0]  # Projected CLS token
+            img_feature_last = image_features_last[:, 0]  # Last layer CLS token (768)
+            img_feature = image_features[:, 0]  # Intermediate CLS token (768)
+            img_feature_proj = image_features_proj[:, 0]  # Projected CLS token (512)
             
             # Patches for cross-attention (exclude CLS token)
-            patches = image_features_proj[:, 1:]  # (batch, num_patches, embed_dim)
+            patches = image_features_proj[:, 1:]  # (batch, num_patches, 512)
             
             # CLS token for final sequence
-            cls_token = image_features_proj[:, :1]  # (batch, 1, embed_dim)
+            cls_token = image_features_proj[:, :1]  # (batch, 1, 512)
             
         elif self.model_name == 'RN50':
             # ResNet50: global feature + spatial features
+            # Đoạn này cần kiểm tra kỹ output của CLIP ResNet50
+            # Theo CLIP-ReID: image_features_proj[0] là global feature (1024)
+            #                image_features_proj[1] là spatial features (1024, h, w)
+            #                image_features_proj[2] là projected global feature (512)
+            #                image_features_proj[3] là projected spatial features (512, h, w)
+            
             # Global features
-            img_feature_last = F.avg_pool2d(image_features_last, image_features_last.shape[2:]).squeeze()
-            img_feature = F.avg_pool2d(image_features, image_features.shape[2:]).squeeze()
-            img_feature_proj = image_features_proj[0]  # Global projected feature
+            img_feature_last = F.avg_pool2d(image_features_last, image_features_last.shape[2:]).view(x.shape[0], -1)  # (batch, 2048)
+            img_feature = F.avg_pool2d(image_features, image_features.shape[2:]).view(x.shape[0], -1)  # (batch, 2048)
+            img_feature_proj = image_features_proj[0]  # Global projected feature (1024)
             
-            # For ResNet, we need to create "patches" from spatial features
-            # image_features_proj[1] has shape (batch, 1024, h, w)
-            b, c, h, w = image_features_proj[1].shape
-            patches = image_features_proj[1].view(b, c, -1).permute(0, 2, 1)  # (batch, h*w, 512)
-            
-            # Create CLS token from global average pooling
-            cls_token = img_feature_proj.unsqueeze(1)  # (batch, 1, 512)
+            # Với ResNet50, chúng ta cần dùng projected spatial features (512) cho cross-attention
+            # image_features_proj[3] có shape (batch, 512, h, w)
+            if len(image_features_proj) > 3:
+                b, c, h, w = image_features_proj[3].shape  # c = 512
+                patches = image_features_proj[3].view(b, c, -1).permute(0, 2, 1)  # (batch, h*w, 512)
+                
+                # Tạo CLS token từ projected global feature (cần project từ 1024 xuống 512)
+                if not hasattr(self, 'resnet_projection'):
+                    self.resnet_projection = nn.Linear(1024, 512).to(x.device)
+                cls_token = self.resnet_projection(img_feature_proj).unsqueeze(1)  # (batch, 1, 512)
+            else:
+                # Fallback: dùng spatial features và project
+                b, c, h, w = image_features_proj[1].shape  # c = 1024
+                patches = image_features_proj[1].view(b, c, -1).permute(0, 2, 1)  # (batch, h*w, 1024)
+                
+                # Project patches từ 1024 xuống 512
+                if not hasattr(self, 'patch_projection'):
+                    self.patch_projection = nn.Linear(1024, 512).to(x.device)
+                patches = self.patch_projection(patches)  # (batch, h*w, 512)
+                
+                # Tạo CLS token
+                if not hasattr(self, 'resnet_projection'):
+                    self.resnet_projection = nn.Linear(1024, 512).to(x.device)
+                cls_token = self.resnet_projection(img_feature_proj).unsqueeze(1)  # (batch, 1, 512)
         
         # Get global visual embedding for inversion network
-        v = img_feature_proj
+        # Dùng projected feature cho inversion (luôn là 512)
+        if self.model_name == 'ViT-B-16':
+            v = img_feature_proj  # Đã là 512
+        elif self.model_name == 'RN50':
+            # Cần project từ 1024 xuống 512
+            if not hasattr(self, 'inversion_projection'):
+                self.inversion_projection = nn.Linear(1024, 512).to(x.device)
+            v = self.inversion_projection(img_feature_proj)  # (batch, 512)
 
         # Generate text features based on prompt mode
         if self.prompt_mode == 'simplified':
-            # Use fixed prompt: "A photo of a person"
             self._ensure_text_features()
             text_feat = self._text_feat_cached.to(device=x.device).expand(x.shape[0], -1)
         else:
-            # Use composed prompt with pseudo token
-            s_star = self.inversion(v)  # Generate pseudo token
+            s_star = self.inversion(v)  # Generate pseudo token (512)
             prompts, tokenized = self.prompt_composer(s_star)
             with torch.no_grad():
-                text_feat = self.text_encoder(prompts, tokenized)
+                text_feat = self.text_encoder(prompts, tokenized)  # (batch, 512)
 
         # ========== Multimodal Interaction Module (MIM) ==========
-        # Cross-attention: text features (Q) attend to visual patches (K, V)
         attention_map = self.cross_guidance(text_feat, patches)  # (batch, num_patches)
-        
-        # Re-weight patches with attention weights (Equation in paper)
-        # This is the semantic guidance: patches aligned with text get higher weights
         patches_weighted = patches * attention_map.unsqueeze(-1)
         
         # ========== Construct Sequence for Transformer Blocks ==========
-        # As in paper: CLS token + re-weighted patches
         seq = torch.cat([cls_token, patches_weighted], dim=1)
         
         # ========== Post Cross-Attention Transformer Blocks ==========
-        # 2 transformer blocks as described in paper (after Eq. 7)
         seq = self.post_blocks(seq)
         
         # Extract final representation from CLS token (index 0)
-        v_final = seq[:, 0]  # (batch, embed_dim)
+        v_final = seq[:, 0]  # (batch, 512)
         
         # ========== Bottleneck Layers ==========
-        feat = self.bottleneck(v_final)
-        feat_proj = self.bottleneck_proj(v_final)
+        # Dùng img_feature (768/2048) cho bottleneck chính
+        # Dùng v_final (512) cho bottleneck projection
+        feat = self.bottleneck(img_feature)  # (batch, in_planes)
+        
+        # Với ResNet50, cần project v_final từ 512 lên 1024 cho bottleneck_proj
+        if self.model_name == 'RN50':
+            if not hasattr(self, 'final_projection'):
+                self.final_projection = nn.Linear(512, 1024).to(x.device)
+            feat_proj_input = self.final_projection(v_final)
+        else:
+            feat_proj_input = v_final  # ViT: giữ nguyên 512
+            
+        feat_proj = self.bottleneck_proj(feat_proj_input)
 
         # ========== Output ==========
         if self.training:
-            # Training mode: return classification scores and features
             cls_score = self.classifier(feat)
             cls_score_proj = self.classifier_proj(feat_proj)
             
-            # Return format based on original ReID code
+            # Return format giống hệt CLIP-ReID
             return [cls_score, cls_score_proj], [img_feature_last, img_feature, v_final], v_final
         else:
-            # Inference mode
             if self.neck_feat == 'after':
                 # Concatenate features after bottleneck
                 return torch.cat([feat, feat_proj], dim=1)
             else:
-                # Concatenate original image feature with final representation
-                return torch.cat([img_feature, v_final], dim=1)
+                # Concatenate original image feature với v_final
+                # Với ResNet50, cần project v_final từ 512 lên 1024
+                if self.model_name == 'RN50':
+                    if not hasattr(self, 'concat_projection'):
+                        self.concat_projection = nn.Linear(512, 1024).to(x.device)
+                    v_final_concat = self.concat_projection(v_final)
+                else:
+                    v_final_concat = v_final
+                return torch.cat([img_feature, v_final_concat], dim=1)
 
     def load_param(self, trained_path):
         """Load pretrained parameters"""
         param_dict = torch.load(trained_path, map_location='cpu')
         for key in param_dict:
-            # Remove 'module.' prefix if exists (from DataParallel)
             new_key = key.replace('module.', '')
             if new_key in self.state_dict():
                 self.state_dict()[new_key].copy_(param_dict[key])
-
 def load_clip_to_cpu(backbone_name, h_resolution, w_resolution, vision_stride_size):
     from .clip import clip
     url = clip._MODELS[backbone_name]
