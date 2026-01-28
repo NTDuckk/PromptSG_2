@@ -363,8 +363,12 @@ class PromptSGModel(nn.Module):
             cls_score = self.classifier(feat)
             cls_score_proj = self.classifier_proj(feat_proj)
             
-            # Return format giống hệt CLIP-ReID
-            return [cls_score, cls_score_proj], [img_feature_last, img_feature, v_final], v_final
+            # Return format: cls_score, triplet_feats, image_feat, text_feat
+            # cls_score: [cls_score, cls_score_proj] 
+            # triplet_feats: [img_feature_last, img_feature, v_final]
+            # image_feat: v_final (final representation)
+            # text_feat: text features from cross-attention
+            return [cls_score, cls_score_proj], [img_feature_last, img_feature, v_final], v_final, text_feat
         else:
             if self.neck_feat == 'after':
                 # Concatenate features after bottleneck
