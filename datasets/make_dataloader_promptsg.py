@@ -27,7 +27,7 @@ def train_collate_fn(batch):
     pids = torch.tensor(pids, dtype=torch.int64)
     viewids = torch.tensor(viewids, dtype=torch.int64)
     camids = torch.tensor(camids, dtype=torch.int64)
-    return torch.stack(imgs, dim=0), pids, camids, viewids
+    return torch.stack(imgs, dim=0), pids, camids, viewids,
 
 
 def val_collate_fn(batch):
@@ -58,7 +58,7 @@ def make_dataloader(cfg):
 
     dataset = __factory[cfg.DATASETS.NAMES](root=cfg.DATASETS.ROOT_DIR)
     train_set = ImageDataset(dataset.train, train_transforms)
-
+    train_set_normal = ImageDataset(dataset.train, val_transforms)
     num_classes = dataset.num_train_pids
     cam_num = dataset.num_train_cams
     view_num = dataset.num_train_vids
@@ -70,7 +70,7 @@ def make_dataloader(cfg):
             mini_batch_size = ims_per_batch // dist.get_world_size()
             data_sampler = RandomIdentitySampler_DDP(dataset.train, ims_per_batch, cfg.DATALOADER.NUM_INSTANCE)
             batch_sampler = torch.utils.data.sampler.BatchSampler(data_sampler, mini_batch_size, True)
-            train_loader = DataLoader(
+            train_loader = torch.utils.data.DataLoader(
                 train_set,
                 num_workers=num_workers,
                 batch_sampler=batch_sampler,
@@ -85,15 +85,15 @@ def make_dataloader(cfg):
                 num_workers=num_workers,
                 collate_fn=train_collate_fn,
             )
-    else:
-        train_loader = DataLoader(
-            train_set,
-            batch_size=ims_per_batch,
-            shuffle=True,
-            num_workers=num_workers,
-            collate_fn=train_collate_fn,
+    elif cfg.DATALOADER.SAMPLER == 'softmax':
+        print('using softmax sampler')
+        train_loader_stage2 = DataLoader(
+            train_set, batch_size=cfg.SOLVER.STAGE2.IMS_PER_BATCH, shuffle=True, num_workers=num_workers,
+            collate_fn=train_collate_fn
         )
-
+    else:
+        print('unsupported sampler! expected softmax or triplet but got {}'.format(cfg.SAMPLER))
+        
     val_set = ImageDataset(dataset.query + dataset.gallery, val_transforms)
     val_loader = DataLoader(
         val_set,

@@ -59,9 +59,25 @@ if __name__ == '__main__':
     os.environ['CUDA_VISIBLE_DEVICES'] = cfg.MODEL.DEVICE_ID
 
     train_loader, val_loader, num_query, num_classes, camera_num, view_num = make_dataloader(cfg)
-
+    
+    # Create directory for dataloader logging
+    dataloader_log_dir = os.path.join(output_dir, 'make_dataloader_train_logging')
+    if not os.path.exists(dataloader_log_dir):
+        os.makedirs(dataloader_log_dir)
+    
+    # Setup logger for dataloader info
+    dataloader_logger = setup_logger('dataloader_info', dataloader_log_dir, if_train=True)
+    dataloader_logger.info('=== DataLoader Info ===')
+    dataloader_logger.info(f'Train loader length: {len(train_loader)} batches')
+    dataloader_logger.info(f'Val loader length: {len(val_loader)} batches')
+    dataloader_logger.info(f'Num query: {num_query}')
+    dataloader_logger.info(f'Num classes: {num_classes}')
+    dataloader_logger.info(f'Camera num: {camera_num}')
+    dataloader_logger.info(f'View num: {view_num}')
+    dataloader_logger.info('======================')
+    
     model = make_model(cfg, num_class=num_classes, camera_num=camera_num, view_num=view_num)
-
+    # model đang chứa: 
     loss_fn = make_loss(cfg, num_classes=num_classes)
 
     optimizer = make_optimizer(cfg, model)
