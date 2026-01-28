@@ -155,7 +155,12 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
                 # ============ DEBUG: Check model outputs ============
                 if epoch == 1 and n_iter == 0:
                     logger.info("=== DEBUG: Model Outputs ===")
-                    logger.info(f"cls_score shape: {cls_score.shape}")
+                    if isinstance(cls_score, (list, tuple)):
+                        logger.info(f"Number of cls_scores: {len(cls_score)}")
+                        for i, score in enumerate(cls_score):
+                            logger.info(f"  cls_score[{i}] shape: {score.shape}")
+                    else:
+                        logger.info(f"cls_score shape: {cls_score.shape}")
                     logger.info(f"triplet_feats type: {type(triplet_feats)}")
                     if isinstance(triplet_feats, (list, tuple)):
                         logger.info(f"Number of triplet features: {len(triplet_feats)}")
@@ -196,7 +201,9 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
             scaler.update()
 
             with torch.no_grad():
-                acc = (cls_score.max(1)[1] == target).float().mean()
+                # cls_score is a list [cls_score, cls_score_proj], use first one for accuracy
+                main_cls_score = cls_score[0] if isinstance(cls_score, (list, tuple)) else cls_score
+                acc = (main_cls_score.max(1)[1] == target).float().mean()
 
             loss_meter.update(loss.item(), img.shape[0])
             id_meter.update(id_loss.item(), img.shape[0])
