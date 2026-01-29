@@ -35,10 +35,12 @@ def make_loss(cfg, num_classes):
             # ID Loss (giống CLIP-ReID)
             if cfg.MODEL.IF_LABELSMOOTH == 'on':
                 if isinstance(score, list):
-                    ID_LOSS = [xent(scor, target) for scor in score]
+                    # ID_LOSS = [xent(scor, target) for scor in score]
+                    ID_LOSS = [xent(scor, target.cpu()) for scor in score]
                     ID_LOSS = sum(ID_LOSS)
                 else:
-                    ID_LOSS = xent(score, target)
+                    # ID_LOSS = xent(score, target)
+                    ID_LOSS = xent(score, target.cpu())
             else:
                 if isinstance(score, list):
                     ID_LOSS = [F.cross_entropy(scor, target) for scor in score]
