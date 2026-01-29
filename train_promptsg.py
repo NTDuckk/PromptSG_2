@@ -77,7 +77,7 @@ if __name__ == '__main__':
     dataloader_logger.info('======================')
     
     model = make_model(cfg, num_class=num_classes, camera_num=camera_num, view_num=view_num)
-    # model đang chứa: 
+
     loss_fn = make_loss(cfg, num_classes=num_classes)
 
     optimizer = make_optimizer(cfg, model)

@@ -87,12 +87,12 @@ def make_dataloader(cfg):
             )
     elif cfg.DATALOADER.SAMPLER == 'softmax':
         print('using softmax sampler')
-        train_loader_stage2 = DataLoader(
-            train_set, batch_size=cfg.SOLVER.STAGE2.IMS_PER_BATCH, shuffle=True, num_workers=num_workers,
+        train_loader = DataLoader(
+            train_set, batch_size=cfg.SOLVER.PROMPTSG.IMS_PER_BATCH, shuffle=True, num_workers=num_workers,
             collate_fn=train_collate_fn
         )
     else:
-        print('unsupported sampler! expected softmax or triplet but got {}'.format(cfg.SAMPLER))
+        print('unsupported sampler! expected softmax or triplet but got {}'.format(cfg.DATALOADER.SAMPLER))
         
     val_set = ImageDataset(dataset.query + dataset.gallery, val_transforms)
     val_loader = DataLoader(
