@@ -177,7 +177,11 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
                     logger.info("===========================")
                 # ============ END DEBUG ============
 
-                loss, id_loss, tri_loss, supcon_loss = loss_fn(cls_score, triplet_feats, target, camid, image_feat, text_feat)
+                total_loss, losses_dict = loss_fn(cls_score, triplet_feats, target, camid, image_feat, text_feat)
+                loss = total_loss
+                id_loss = losses_dict['id_loss']
+                tri_loss = losses_dict['tri_loss']
+                supcon_loss = losses_dict['supcon_loss']
                 
                 # ============ DEBUG: Check loss values ============
                 if epoch == 1 and n_iter == 0:
