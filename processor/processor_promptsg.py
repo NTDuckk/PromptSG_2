@@ -150,7 +150,8 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
             target = pid.to(device)
 
             with amp.autocast(enabled=True):
-                cls_score, triplet_feats, image_feat, text_feat = model(img, target)
+                # cls_score, triplet_feats, image_feat, text_feat = model(img, target)
+                cls_score, triplet_feats, image_feat, text_feat = model(img, target.long())
                 
                 # ============ DEBUG: Check model outputs ============
                 if epoch == 1 and n_iter == 0:
