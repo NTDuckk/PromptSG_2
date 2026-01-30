@@ -271,7 +271,7 @@ class PromptSGModel(nn.Module):
                 prompts = self.embed_simplified      # Đã có trong buffer
                 self._text_feat_cached = self.text_encoder(prompts, tokenized).detach().cpu()
 
-    def forward(self, x, label=None, get_image=False, get_text=False, cam_label=None, view_label=None):
+    def forward(self, x = None, label=None, get_image=False, get_text=False, cam_label=None, view_label=None):
         """
         Forward pass of PromptSG model
         """
@@ -305,13 +305,6 @@ class PromptSGModel(nn.Module):
         
         # image_features_last, image_features, image_features_proj = self.image_encoder(x)
         features_intermediate, features_final, features_proj= self.image_encoder(x)
-        
-        # Debug: Print shapes
-        print(f"=== DEBUG: Image Features Shapes ===")
-        print(f"features_intermediate shape: {features_intermediate.shape}")
-        print(f"features_final shape: {features_final.shape}")
-        print(f"features_proj shape: {features_proj.shape}")
-        print(f"=====================================")
         
         # Extract features based on backbone type
         if self.model_name == 'ViT-B-16':
@@ -445,8 +438,10 @@ class PromptSGModel(nn.Module):
             # image_feat: v_final (final representation)
             # text_feat: text features from cross-attention
 
-            #processor đang nhận: cls_score, triplet_feats, image_feat, text_feat, target.
-            return [cls_score, cls_score_proj], [CLS_intermediate, CLS_final, v_final], v_final, text_feat
+            #processor đang nhận: cls_score, triplet_feats, image_feat, text_feat, target.  
+            # return [cls_score, cls_score_proj], [CLS_intermediate, CLS_final, v_final], v_final, text_feat
+            return [cls_score, cls_score_proj], [CLS_intermediate, CLS_final, v_final], CLS_proj, text_feat
+
         else:
             if self.neck_feat == 'after':
                 # Concatenate features after bottleneck

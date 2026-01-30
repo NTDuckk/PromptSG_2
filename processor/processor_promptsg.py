@@ -107,6 +107,10 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
     metrics_logger.info(f"Prompt mode: {cfg.MODEL.PROMPTSG.PROMPT_MODE}")
     metrics_logger.info(f"Max epochs: {epochs}")
     metrics_logger.info(f"Learning rate: {cfg.SOLVER.PROMPTSG.BASE_LR_VISUAL}")
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    metrics_logger.info(f"Total parameters: {total_params:,}")
+    metrics_logger.info(f"Trainable parameters: {trainable_params:,}")
     metrics_logger.info("="*50)
 
     if device:
@@ -114,15 +118,6 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
         model.to(device)
         if torch.cuda.device_count() > 1:
             model = nn.DataParallel(model)
-
-    # ============ DEBUG: Log model info ============
-    logger.info(f"Model name: {cfg.MODEL.NAME}")
-    logger.info(f"Prompt mode: {cfg.MODEL.PROMPTSG.PROMPT_MODE}")
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"Total parameters: {total_params:,}")
-    logger.info(f"Trainable parameters: {trainable_params:,}")
-    # ============ END DEBUG ============
 
     loss_meter = AverageMeter()
     acc_meter = AverageMeter()
@@ -151,8 +146,8 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
 
             with amp.autocast(enabled=True):
                 # cls_score, triplet_feats, image_feat, text_feat = model(img, target)
-                cls_score, triplet_feats, image_feat, text_feat = model(img, target.long())
-                
+                cls_score, triplet_feats, image_feat, text_feat = model(x = img, label = target)
+
                 # ============ DEBUG: Check model outputs ============
                 if epoch == 1 and n_iter == 0:
                     logger.info("=== DEBUG: Model Outputs ===")
