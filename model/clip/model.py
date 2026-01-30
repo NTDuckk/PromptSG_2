@@ -226,11 +226,11 @@ class VisionTransformer(nn.Module):
         
         x = x.permute(1, 0, 2)  # NLD -> LND
         
-        x10 = self.transformer.resblocks[:10](x)
-        x11 = self.transformer.resblocks[10](x10)
-        x12 = self.transformer.resblocks[11](x11)
+        # x10 = self.transformer.resblocks[:10](x)
+        x11 = self.transformer.resblocks[:11](x) 
+        x12 = self.transformer.resblocks[11](x11) 
 
-        x10 = x10.permute(1, 0, 2)  # LND -> NLD
+        # x10 = x10.permute(1, 0, 2)  # LND -> NLD
         x11 = x11.permute(1, 0, 2)  # LND -> NLD
         x12 = x12.permute(1, 0, 2)  # LND -> NLD
 
@@ -240,7 +240,7 @@ class VisionTransformer(nn.Module):
             xproj = x12 @ self.proj   
 
         if return_intermediate:
-            return x10, x11, x12, xproj
+            return x11, x12, xproj
 
         return x11, x12, xproj
 

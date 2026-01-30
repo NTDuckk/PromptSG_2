@@ -253,7 +253,7 @@ class PromptSGModel(nn.Module):
                 d_model=512,
                 nhead=cfg.MODEL.PROMPTSG.CROSS_ATTN_HEADS,   # = 8
                 mlp_ratio=4.0,                               # 512*4 = 2048 giống bạn set
-                drop=0.0,                                    # thường để 0 cho giống CLIP
+                drop=0.0,                                    # thường để 0
                 attn_drop=0.0
             )
             for _ in range(cfg.MODEL.PROMPTSG.POST_CA_BLOCKS) # = 2
