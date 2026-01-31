@@ -135,17 +135,57 @@ class PromptComposer(nn.Module):
         return prompts, tokenized
 
 
-class CrossAttentionGuidance(nn.Module):
-    def __init__(self, embed_dim: int, num_heads: int):
+class MultimodalInteractionModule(nn.Module):
+    def __init__(self, embed_dim: int, num_heads: int, num_blocks: int = 2):
         super().__init__()
-        self.attn = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads, batch_first=True)
+        # Cross-attention: text query, patches key/value
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=embed_dim, num_heads=num_heads, batch_first=True
+        )
+        self.cross_norm = nn.LayerNorm(embed_dim)
+        
+        # Post cross-attention transformer blocks
+        self.post_blocks = nn.ModuleList([
+            PostCABlock(d_model=embed_dim, nhead=num_heads) 
+            for _ in range(num_blocks)
+        ])
 
-    def forward(self, text_feat: torch.Tensor, patch_tokens: torch.Tensor):
-        q = text_feat.unsqueeze(1)
-        _, attn_weights  = self.attn(q, patch_tokens, patch_tokens, need_weights=True, average_attn_weights=False)
-        attn_map = attn_weights.mean(dim=1)  # (batch, 1, num_patches)
-        attn_map = attn_map.squeeze(1)      # (batch, num_patches)
-        return attn_map
+    def forward(self, text_feat, patch_tokens, cls_token=None):
+        """
+        Args:
+            text_feat: (batch, embed_dim) - text embedding
+            patch_tokens: (batch, num_patches, embed_dim) - image patches
+            cls_token: (batch, 1, embed_dim) - optional CLS token
+        Returns:
+            sequence: (batch, seq_len, embed_dim) - after MIM
+        """
+        # Prepare text as query (add sequence dimension)
+        text_query = text_feat.unsqueeze(1)  # (batch, 1, embed_dim)
+        
+        # Cross-attention: text attends to patches
+        cross_output, attn_weights = self.cross_attn(
+            query=text_query,
+            key=patch_tokens,
+            value=patch_tokens,
+            need_weights=True
+        )
+        
+        # Residual connection (text query + cross output)
+        text_enhanced = self.cross_norm(text_query + cross_output)
+        
+        # Combine with patch tokens and optional CLS token
+        if cls_token is not None:
+            # Option 1: Keep original CLS token
+            sequence = torch.cat([cls_token, text_enhanced, patch_tokens], dim=1)
+        else:
+            # Option 2: Text token replaces CLS token
+            sequence = torch.cat([text_enhanced, patch_tokens], dim=1)
+        
+        # Apply post transformer blocks
+        for block in self.post_blocks:
+            sequence = block(sequence)
+            
+        return sequence, attn_weights
 
 class QuickGELU(nn.Module):
     def forward(self, x):
@@ -242,22 +282,11 @@ class PromptSGModel(nn.Module):
         self.inversion = InversionNetwork(dim=512)  # Luôn là 512 vì CLIP text encoder output 512
 
         # Multimodal Interaction Module (MIM)
-        self.cross_guidance = CrossAttentionGuidance(
+        self.mim = MultimodalInteractionModule(
             embed_dim=512,  # Luôn là 512 cho CLIP
-            num_heads=cfg.MODEL.PROMPTSG.CROSS_ATTN_HEADS
+            num_heads=cfg.MODEL.PROMPTSG.CROSS_ATTN_HEADS,
+            num_blocks=cfg.MODEL.PROMPTSG.POST_CA_BLOCKS
         )
-        
-        # Post cross-attention transformer blocks
-        self.post_blocks = nn.ModuleList([
-            PostCABlock(
-                d_model=512,
-                nhead=cfg.MODEL.PROMPTSG.CROSS_ATTN_HEADS,   # = 8
-                mlp_ratio=4.0,                               # 512*4 = 2048 giống bạn set
-                drop=0.0,                                    # thường để 0
-                attn_drop=0.0
-            )
-            for _ in range(cfg.MODEL.PROMPTSG.POST_CA_BLOCKS) # = 2
-        ])
         
         # Cache for simplified prompt
         self._text_feat_cached = None
@@ -397,18 +426,10 @@ class PromptSGModel(nn.Module):
                 text_feat = self.text_encoder(prompts, tokenized)  # (batch, 512)
 
         # ========== Multimodal Interaction Module (MIM) ==========
-        attention_map = self.cross_guidance(text_feat, patches)  # (batch, num_patches)
-        patches_weighted = patches * attention_map.unsqueeze(-1)
+        sequence, attn_weights = self.mim(text_feat, patches, cls_token)
         
-        # ========== Construct Sequence for Transformer Blocks ==========
-        seq = torch.cat([cls_token, patches_weighted], dim=1)
-        
-        # ========== Post Cross-Attention Transformer Blocks ==========
-        for blk in self.post_blocks:
-            seq = blk(seq)
-
-        # Extract final representation from CLS token (index 0)
-        v_final = seq[:, 0]  # (batch, 512)
+        # Extract final representation from first token (text-enhanced or CLS)
+        v_final = sequence[:, 0]  # (batch, 512)
         
         # ========== Bottleneck Layers ==========
         # Dùng img_feature (768/2048) cho bottleneck chính
