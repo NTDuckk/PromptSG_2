@@ -55,8 +55,9 @@ def make_loss(cfg, num_classes):
 
             # Triplet Loss (giống CLIP-ReID) - BỎ WEIGHT
             if isinstance(feat, list):
-                TRI_LOSS = [triplet(feats, target)[0] for feats in feat]
-                TRI_LOSS = sum(TRI_LOSS)  # Đơn giản tổng các loss, không dùng weight
+                # TRI_LOSS = [triplet(feats, target)[0] for feats in feat]
+                TRI_LOSS = sum([triplet(feats, target)[0] for feats in feat]) / len(feat)
+                # TRI_LOSS = sum(TRI_LOSS)  # Đơn giản tổng các loss, không dùng weight
             else:
                 TRI_LOSS = triplet(feat, target)[0]
 

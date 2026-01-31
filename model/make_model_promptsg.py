@@ -461,7 +461,7 @@ class PromptSGModel(nn.Module):
 
             #processor đang nhận: cls_score, triplet_feats, image_feat, text_feat, target.  
             # return [cls_score, cls_score_proj], [CLS_intermediate, CLS_final, v_final], v_final, text_feat
-            return [cls_score, cls_score_proj], [CLS_intermediate, CLS_final, CLS_proj], v, text_feat
+            return [cls_score, cls_score_proj], [CLS_intermediate, CLS_final, v_final], v, text_feat
 
         else:
             if self.neck_feat == 'after':
