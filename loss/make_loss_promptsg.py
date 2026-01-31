@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 from .softmax_loss import CrossEntropyLabelSmooth, LabelSmoothingCrossEntropy
 from .triplet_loss import TripletLoss
+from .supcontrast import SupConLoss
 
 
 def make_loss(cfg, num_classes):
@@ -21,6 +22,10 @@ def make_loss(cfg, num_classes):
     if cfg.MODEL.IF_LABELSMOOTH == 'on':
         xent = CrossEntropyLabelSmooth(num_classes=num_classes)
         print("label smooth on, numclasses:", num_classes)
+    
+    # Initialize SupConLoss like stage1
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    supcon_loss = SupConLoss(device)
 
     if sampler == 'softmax':
         def loss_func(score, feat, target):
@@ -60,30 +65,9 @@ def make_loss(cfg, num_classes):
             
             # PromptSG: thêm SupCon loss nếu có image_feat và text_feat
             if image_feat is not None and text_feat is not None:
-                # Normalize features
-                img_norm = F.normalize(image_feat, dim=1)
-                txt_norm = F.normalize(text_feat, dim=1)
-                
-                # Tính supervised contrastive loss
-                # image-to-text
-                sim_i2t = torch.matmul(img_norm, txt_norm.t()) / cfg.MODEL.PROMPTSG.TEMPERATURE
-                # text-to-image  
-                sim_t2i = torch.matmul(txt_norm, img_norm.t()) / cfg.MODEL.PROMPTSG.TEMPERATURE
-                
-                # Tạo mask cho positive pairs (cùng ID)
-                batch_size = target.size(0)
-                mask = target.expand(batch_size, batch_size).eq(target.expand(batch_size, batch_size).t())
-                
-                # Tính loss cho cả hai chiều (PromptSG Eq.2-3)
-                loss_i2t = -torch.log(
-                    (F.softmax(sim_i2t, dim=1) * mask.float()).sum(dim=1) / 
-                    F.softmax(sim_i2t, dim=1).sum(dim=1)
-                ).mean()
-                
-                loss_t2i = -torch.log(
-                    (F.softmax(sim_t2i, dim=1) * mask.float()).sum(dim=1) / 
-                    F.softmax(sim_t2i, dim=1).sum(dim=1)
-                ).mean()
+                # Use SupConLoss like stage1 - temperature = 1.0 (hardcoded in SupConLoss)
+                loss_i2t = supcon_loss(image_feat, text_feat, target, target)
+                loss_t2i = supcon_loss(text_feat, image_feat, target, target)
                 
                 SUPCON_LOSS = loss_i2t + loss_t2i
                 total_loss += cfg.MODEL.PROMPTSG.LAMBDA_SUPCON * SUPCON_LOSS
