@@ -173,6 +173,44 @@ class PostCABlock(nn.Module):
         return x
 
 class MultimodalInteractionModule(nn.Module):
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int,
+        num_blocks: int = 2,
+        mlp_ratio: float = 4.0,
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        drop_path: float = 0.0,
+        reweight: str = "mul_mean1",
+    ):
+        super().__init__()
+        self.reweight = reweight
+
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            dropout=attn_drop,
+            batch_first=True,
+        )
+
+        self.q_ln = nn.LayerNorm(embed_dim)
+        self.kv_ln = nn.LayerNorm(embed_dim)
+
+        self.post_blocks = nn.ModuleList(
+            [
+                PostCABlock(
+                    d_model=embed_dim,
+                    nhead=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    drop_path=drop_path,
+                    attn_drop=attn_drop,
+                    proj_drop=proj_drop,
+                )
+                for _ in range(num_blocks)
+            ]
+        )
+
     def forward(self, text_feat, patch_tokens, cls_token, return_cls_states=False):
         B, M, D = patch_tokens.shape
 
