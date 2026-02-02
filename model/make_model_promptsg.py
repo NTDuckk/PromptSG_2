@@ -134,72 +134,13 @@ class PromptComposer(nn.Module):
         prompts = torch.cat([prefix, s_star.unsqueeze(1), suffix], dim=1)
         return prompts, tokenized
 
-
-class MultimodalInteractionModule(nn.Module):
-    def __init__(self, embed_dim: int, num_heads: int, num_blocks: int = 2):
-        super().__init__()
-        # Cross-attention: text query, patches key/value
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=embed_dim, num_heads=num_heads, batch_first=True
-        )
-        self.cross_norm = nn.LayerNorm(embed_dim)
-        
-        # Post cross-attention transformer blocks
-        self.post_blocks = nn.ModuleList([
-            PostCABlock(d_model=embed_dim, nhead=num_heads) 
-            for _ in range(num_blocks)
-        ])
-
-    def forward(self, text_feat, patch_tokens, cls_token=None):
-        """
-        Args:
-            text_feat: (batch, embed_dim) - text embedding
-            patch_tokens: (batch, num_patches, embed_dim) - image patches
-            cls_token: (batch, 1, embed_dim) - optional CLS token
-        Returns:
-            sequence: (batch, seq_len, embed_dim) - after MIM
-        """
-        # Prepare text as query (add sequence dimension)
-        text_query = text_feat.unsqueeze(1)  # (batch, 1, embed_dim)
-        
-        # Cross-attention: text attends to patches
-        cross_output, attn_weights = self.cross_attn(
-            query=text_query,
-            key=patch_tokens,
-            value=patch_tokens,
-            need_weights=True
-        )
-        
-        # Residual connection (text query + cross output)
-        text_enhanced = self.cross_norm(text_query + cross_output)
-        
-        # Combine with patch tokens and optional CLS token
-        if cls_token is not None:
-            # Option 1: Keep original CLS token
-            sequence = torch.cat([cls_token, text_enhanced, patch_tokens], dim=1)
-        else:
-            # Option 2: Text token replaces CLS token
-            sequence = torch.cat([text_enhanced, patch_tokens], dim=1)
-        
-        # Apply post transformer blocks
-        for block in self.post_blocks:
-            sequence = block(sequence)
-            
-        return sequence, attn_weights
-
 class QuickGELU(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(1.702 * x)
 
 class PostCABlock(nn.Module):
-    """
-    CLIP/ViT-style Transformer block:
-    - Pre-LN
-    - MHSA (self-attn) + residual
-    - MLP(4x) + residual
-    - no dropout by default
-    """
-    def __init__(self, d_model=512, nhead=8, mlp_ratio=4.0, drop=0.0, attn_drop=0.0):
+    """ViT-style Encoder block: PreLN -> SelfAttn -> MLP"""
+    def __init__(self, d_model=512, nhead=8, mlp_ratio=4.0, drop_path=0.0, attn_drop=0.0, proj_drop=0.0):
         super().__init__()
         self.ln1 = nn.LayerNorm(d_model)
         self.attn = nn.MultiheadAttention(
@@ -208,28 +149,66 @@ class PostCABlock(nn.Module):
             dropout=attn_drop,
             batch_first=True
         )
-        self.ln2 = nn.LayerNorm(d_model)
 
+        self.ln2 = nn.LayerNorm(d_model)
         hidden = int(d_model * mlp_ratio)
         self.mlp = nn.Sequential(
             nn.Linear(d_model, hidden),
-            QuickGELU(),          # hoặc nn.GELU() nếu bạn muốn
+            QuickGELU(),
+            nn.Dropout(proj_drop),
             nn.Linear(hidden, d_model),
+            nn.Dropout(proj_drop),
         )
 
-        # Nếu bạn muốn DropPath giống timm/ViT (paper không bắt buộc):
-        self.drop_path = DropPath(drop) if drop > 0.0 else nn.Identity()
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
     def forward(self, x):
-        # Self-Attention (Pre-LN)
+        # Self-attn
         x_norm = self.ln1(x)
         attn_out, _ = self.attn(x_norm, x_norm, x_norm, need_weights=False)
         x = x + self.drop_path(attn_out)
 
-        # FFN / MLP (Pre-LN)
+        # FFN
         x = x + self.drop_path(self.mlp(self.ln2(x)))
         return x
 
+class MultimodalInteractionModule(nn.Module):
+    def forward(self, text_feat, patch_tokens, cls_token, return_cls_states=False):
+        B, M, D = patch_tokens.shape
+
+        q = self.q_ln(text_feat).unsqueeze(1)   # (B,1,D)
+        kv = self.kv_ln(patch_tokens)           # (B,M,D)
+
+        _, attn_w = self.cross_attn(
+            query=q, key=kv, value=kv,
+            need_weights=True,
+            average_attn_weights=False
+        )
+        attn_map = attn_w.mean(dim=1)  # (B,1,M)
+
+        # reweight patches
+        if self.reweight == "mul_mean1":
+            scale = (attn_map.squeeze(1) * M).unsqueeze(-1)  # (B,M,1)
+            patch_rw = patch_tokens * scale
+        elif self.reweight == "mul":
+            patch_rw = patch_tokens * attn_map.transpose(1, 2)
+        elif self.reweight == "residual":
+            scale = (attn_map.squeeze(1) * M).unsqueeze(-1)
+            patch_rw = patch_tokens * (1.0 + scale)
+        else:
+            raise ValueError(f"Unknown reweight mode: {self.reweight}")
+
+        # seq before post blocks
+        seq = torch.cat([cls_token, patch_rw], dim=1)  # (B,1+M,D)
+
+        cls_states = [seq[:, 0, :]]  # state0 (before blocks)
+        for blk in self.post_blocks:
+            seq = blk(seq)
+            cls_states.append(seq[:, 0, :])  # state after each block
+
+        if return_cls_states:
+            return seq, attn_map, cls_states  # len = 1 + num_blocks
+        return seq, attn_map
 
 class PromptSGModel(nn.Module):
     def __init__(self, num_classes, camera_num, view_num, cfg):
@@ -288,17 +267,22 @@ class PromptSGModel(nn.Module):
             num_blocks=cfg.MODEL.PROMPTSG.POST_CA_BLOCKS
         )
         
+        for p in self.text_encoder.parameters():
+            p.requires_grad_(False)
+        self.text_encoder.eval()
+
         # Cache for simplified prompt
         self._text_feat_cached = None
 
     def _ensure_text_features(self):
-        """Cache text features for simplified prompt to avoid recomputation"""
         if self._text_feat_cached is None:
+            self.prompt_composer._ensure_embeddings()
             with torch.no_grad():
-                # Dùng trực tiếp simplified prompt, không qua prompt_composer
-                tokenized = self.tokenized_simplified  # Đã có trong buffer
-                prompts = self.embed_simplified      # Đã có trong buffer
-                self._text_feat_cached = self.text_encoder(prompts, tokenized).detach().cpu()
+                prompts = self.prompt_composer.embed_simplified  # (1,L,512)
+                tokenized = self.prompt_composer.tokenized_simplified  # (1,L)
+                text = self.text_encoder(prompts, tokenized)  # (1,512)
+            self._text_feat_cached = text.detach().cpu()
+
 
     def forward(self, x = None, label=None, get_image=False, get_text=False, cam_label=None, view_label=None):
         """
@@ -316,8 +300,8 @@ class PromptSGModel(nn.Module):
                 v = features_proj[:, 0] if self.model_name == 'ViT-B-16' else features_proj[0]
                 s_star = self.inversion(v)
                 prompts, tokenized = self.prompt_composer(s_star)
-                with torch.no_grad():
-                    text_features = self.text_encoder(prompts, tokenized)
+                # with torch.no_grad():
+                text_features = self.text_encoder(prompts, tokenized)
             return text_features
 
         # Get image features only
@@ -333,22 +317,22 @@ class PromptSGModel(nn.Module):
         # Get image features from CLIP visual encoder
         
         # image_features_last, image_features, image_features_proj = self.image_encoder(x)
-        features_intermediate, features_final, features_proj= self.image_encoder(x)
-        
+        features_intermediate, features_final, features_proj = self.image_encoder(x)
+
         # Extract features based on backbone type
         if self.model_name == 'ViT-B-16':
             # ViT-B/16: [CLS] token + patch tokens
             # img_feature_last = image_features_last[:, 0]  # Last layer CLS token (768)
             # img_feature = image_features[:, 0]  # Intermediate CLS token (768)
             # img_feature_proj = image_features_proj[:, 0]  # Projected CLS token (512)
-            
+         
             CLS_intermediate = features_intermediate[:, 0]  # Intermediate CLS token (768)
             CLS_final = features_final[:, 0]  # Last layer CLS token (768)
             CLS_proj = features_proj[:, 0]  # Projected CLS token (512)
             
             # Patches for cross-attention (exclude CLS token)
             patches = features_proj[:, 1:]  # (batch, num_patches, 512)
-            
+             
             # CLS token for final sequence
             cls_token = features_proj[:, :1]  # (batch, 1, 512)
             
@@ -418,7 +402,8 @@ class PromptSGModel(nn.Module):
         # Generate text features based on prompt mode
         if self.prompt_mode == 'simplified':
             self._ensure_text_features()
-            text_feat = self._text_feat_cached.to(device=x.device).expand(x.shape[0], -1)
+            device = x.device if x is not None else next(self.parameters()).device
+            text_feat = self._text_feat_cached.to(device).expand(x.shape[0], -1)
         else:
             s_star = self.inversion(v)  # Generate pseudo token (512)
             prompts, tokenized = self.prompt_composer(s_star)
@@ -426,10 +411,13 @@ class PromptSGModel(nn.Module):
                 text_feat = self.text_encoder(prompts, tokenized)  # (batch, 512)
 
         # ========== Multimodal Interaction Module (MIM) ==========
-        sequence, attn_weights = self.mim(text_feat, patches, cls_token)
+        # sequence, attn_map = self.mim(text_feat, patches, cls_token)
+        sequence, attn_map, cls_states = self.mim(text_feat, patches, cls_token, return_cls_states=True)
         
         # Extract final representation from first token (text-enhanced or CLS)
-        v_final = sequence[:, 0]  # (batch, 512)
+        # v_final = sequence[:, 0, :]   # (batch, 512)
+        triplet_feats = [cls_states[-1], cls_states[-2], cls_states[-3]]
+        v_final = cls_states[-1]
         
         # ========== Bottleneck Layers ==========
         # Dùng img_feature (768/2048) cho bottleneck chính
@@ -461,7 +449,7 @@ class PromptSGModel(nn.Module):
 
             #processor đang nhận: cls_score, triplet_feats, image_feat, text_feat, target.  
             # return [cls_score, cls_score_proj], [CLS_intermediate, CLS_final, v_final], v_final, text_feat
-            return [cls_score, cls_score_proj], [CLS_intermediate, CLS_final, v_final], v, text_feat
+            return [cls_score_proj], triplet_feats, v_final, text_feat
 
         else:
             if self.neck_feat == 'after':
@@ -485,6 +473,8 @@ class PromptSGModel(nn.Module):
             new_key = key.replace('module.', '')
             if new_key in self.state_dict():
                 self.state_dict()[new_key].copy_(param_dict[key])
+
+
 from .clip import clip
 def load_clip_to_cpu(backbone_name, h_resolution, w_resolution, vision_stride_size):
     url = clip._MODELS[backbone_name]
