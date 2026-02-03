@@ -65,7 +65,7 @@ import torch.nn.functional as F
 #         return -mean_log_prob_pos.mean()
 
 class SupConLoss(nn.Module):
-    def __init__(self, device, temperature=0.07, eps=1e-12, normalize=True):
+    def __init__(self, device, temperature=0.1, eps=1e-12, normalize=True):
         super().__init__()
         self.device = device
         self.temperature = temperature

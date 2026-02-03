@@ -315,10 +315,10 @@ class PromptSGModel(nn.Module):
     def _ensure_text_features(self):
         if self._text_feat_cached is None:
             self.prompt_composer._ensure_embeddings()
-            with torch.no_grad():
-                prompts = self.prompt_composer.embed_simplified  # (1,L,512)
-                tokenized = self.prompt_composer.tokenized_simplified  # (1,L)
-                text = self.text_encoder(prompts, tokenized)  # (1,512)
+            # with torch.no_grad():
+            prompts = self.prompt_composer.embed_simplified  # (1,L,512)
+            tokenized = self.prompt_composer.tokenized_simplified  # (1,L)
+            text = self.text_encoder(prompts, tokenized)  # (1,512)
             self._text_feat_cached = text.detach().cpu()
 
 
@@ -445,8 +445,8 @@ class PromptSGModel(nn.Module):
         else:
             s_star = self.inversion(v)  # Generate pseudo token (512)
             prompts, tokenized = self.prompt_composer(s_star)
-            with torch.no_grad():
-                text_feat = self.text_encoder(prompts, tokenized)  # (batch, 512)
+            # with torch.no_grad():
+            text_feat = self.text_encoder(prompts, tokenized)  # (batch, 512)
 
         # ========== Multimodal Interaction Module (MIM) ==========
         # sequence, attn_map = self.mim(text_feat, patches, cls_token)
