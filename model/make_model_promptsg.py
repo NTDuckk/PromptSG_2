@@ -50,7 +50,6 @@ class TextEncoder(nn.Module):
         x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection 
         return x
 
-
 class InversionNetwork(nn.Module):
     def __init__(self, dim=512):
         super().__init__()
@@ -134,6 +133,14 @@ class PromptComposer(nn.Module):
         prompts = torch.cat([prefix, s_star.unsqueeze(1), suffix], dim=1)
         return prompts, tokenized
 
+class LayerNorm(nn.LayerNorm):
+    """LayerNorm that is safe to use with fp16 (casts to fp32 for normalization)."""
+
+    def forward(self, x: torch.Tensor):
+        orig_type = x.dtype
+        ret = super().forward(x.float())
+        return ret.to(orig_type)
+
 class QuickGELU(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(1.702 * x)
@@ -142,7 +149,7 @@ class PostCABlock(nn.Module):
     """ViT-style Encoder block: PreLN -> SelfAttn -> MLP"""
     def __init__(self, d_model=512, nhead=8, mlp_ratio=4.0, drop_path=0.0, attn_drop=0.0, proj_drop=0.0):
         super().__init__()
-        self.ln1 = nn.LayerNorm(d_model)
+        self.ln1 = LayerNorm(d_model)
         self.attn = nn.MultiheadAttention(
             embed_dim=d_model,
             num_heads=nhead,
@@ -150,7 +157,7 @@ class PostCABlock(nn.Module):
             batch_first=True
         )
 
-        self.ln2 = nn.LayerNorm(d_model)
+        self.ln2 = LayerNorm(d_model)
         hidden = int(d_model * mlp_ratio)
         self.mlp = nn.Sequential(
             nn.Linear(d_model, hidden),
@@ -194,8 +201,8 @@ class MultimodalInteractionModule(nn.Module):
             batch_first=True,
         )
 
-        self.q_ln = nn.LayerNorm(embed_dim)
-        self.kv_ln = nn.LayerNorm(embed_dim)
+        self.q_ln = LayerNorm(embed_dim)
+        self.kv_ln = LayerNorm(embed_dim)
 
         self.post_blocks = nn.ModuleList(
             [
@@ -315,10 +322,10 @@ class PromptSGModel(nn.Module):
     def _ensure_text_features(self):
         if self._text_feat_cached is None:
             self.prompt_composer._ensure_embeddings()
-            # with torch.no_grad():
-            prompts = self.prompt_composer.embed_simplified  # (1,L,512)
-            tokenized = self.prompt_composer.tokenized_simplified  # (1,L)
-            text = self.text_encoder(prompts, tokenized)  # (1,512)
+            with torch.no_grad():
+                prompts = self.prompt_composer.embed_simplified  # (1,L,512)
+                tokenized = self.prompt_composer.tokenized_simplified  # (1,L)
+                text = self.text_encoder(prompts, tokenized)  # (1,512)
             self._text_feat_cached = text.detach().cpu()
 
 
@@ -445,7 +452,6 @@ class PromptSGModel(nn.Module):
         else:
             s_star = self.inversion(v)  # Generate pseudo token (512)
             prompts, tokenized = self.prompt_composer(s_star)
-            # with torch.no_grad():
             text_feat = self.text_encoder(prompts, tokenized)  # (batch, 512)
 
         # ========== Multimodal Interaction Module (MIM) ==========
@@ -523,6 +529,12 @@ def load_clip_to_cpu(backbone_name, h_resolution, w_resolution, vision_stride_si
         state_dict = None
     except RuntimeError:
         state_dict = torch.load(model_path, map_location="cpu")
+    for key in state_dict.keys():
+        print(key)
+
+    # Hoặc tìm keys chứa "text_projection"
+    text_proj_keys = [k for k in state_dict.keys() if "text_projection" in k]
+    print("Text projection keys test:", text_proj_keys)
 
     model = clip.build_model(state_dict or model.state_dict(), h_resolution, w_resolution, vision_stride_size)
     return model
