@@ -535,6 +535,8 @@ def load_clip_to_cpu(backbone_name, h_resolution, w_resolution, vision_stride_si
 
     # Hoặc tìm keys chứa "text_projection"
     text_proj_keys = [k for k in state_dict.keys() if "text_projection" in k]
+    embed_dim = state_dict["text_projection"].shape[1]
+    print("embed_dim test: ", embed_dim)
     print("Text projection keys test:", text_proj_keys)
 
     model = clip.build_model(state_dict or model.state_dict(), h_resolution, w_resolution, vision_stride_size)
