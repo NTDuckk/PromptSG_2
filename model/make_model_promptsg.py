@@ -526,9 +526,10 @@ def load_clip_to_cpu(backbone_name, h_resolution, w_resolution, vision_stride_si
 
     try:
         model = torch.jit.load(model_path, map_location="cpu").eval()
-        state_dict = None
+        state_dict = model.state_dict()
     except RuntimeError:
         state_dict = torch.load(model_path, map_location="cpu")
+    
     for key in state_dict.keys():
         print(key)
 
