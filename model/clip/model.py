@@ -226,15 +226,18 @@ class VisionTransformer(nn.Module):
         
         x = x.permute(1, 0, 2)  # NLD -> LND
         
-        # x10 = self.transformer.resblocks[:10](x)
-        x11 = self.transformer.resblocks[:11](x) 
+        x10 = self.transformer.resblocks[:10](x)
+        x11 = self.transformer.resblocks[10](x10) 
         x12 = self.transformer.resblocks[11](x11) 
 
-        # x10 = x10.permute(1, 0, 2)  # LND -> NLD
+        x10 = x10.permute(1, 0, 2)  # LND -> NLD
         x11 = x11.permute(1, 0, 2)  # LND -> NLD
         x12 = x12.permute(1, 0, 2)  # LND -> NLD
 
-        x12 = self.ln_post(x12)  
+        
+        x10 = self.ln_post(x10)
+        x11 = self.ln_post(x11)
+        x12 = self.ln_post(x12) 
 
         if self.proj is not None:
             xproj = x12 @ self.proj   

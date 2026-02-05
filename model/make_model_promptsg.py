@@ -47,16 +47,24 @@ class TextEncoder(nn.Module):
         x = x.permute(1, 0, 2)
         x = self.ln_final(x).type(self.dtype)
         # x = x[torch.arange(x.shape[0], device=x.device), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
-        x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection 
+        # x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection 
+        # return x
+        idx = torch.arange(x.shape[0], device=x.device)
+        x = x[idx, tokenized_prompts.argmax(dim=-1)] @ self.text_projection
         return x
 
+
 class InversionNetwork(nn.Module):
-    def __init__(self, dim=512):
+    """
+    f_theta: v (CLIP joint embedding dim) -> s* (token embedding width)
+    Paper: 3-layer MLP, hidden=512, BN after last state.
+    """
+    def __init__(self, v_dim: int, token_dim: int = 512, hidden: int = 512):
         super().__init__()
-        self.fc1 = nn.Linear(dim, dim)
-        self.fc2 = nn.Linear(dim, dim)
-        self.fc3 = nn.Linear(dim, dim)
-        self.bn = nn.BatchNorm1d(dim, affine=False)
+        self.fc1 = nn.Linear(v_dim, hidden)
+        self.fc2 = nn.Linear(hidden, hidden)
+        self.fc3 = nn.Linear(hidden, token_dim)
+        self.bn = nn.BatchNorm1d(token_dim, affine=False)
         self.act = nn.ReLU(inplace=True)
 
     def forward(self, v):
@@ -65,6 +73,7 @@ class InversionNetwork(nn.Module):
         x = self.fc3(x)
         x = self.bn(x)
         return x
+
 
 
 class PromptComposer(nn.Module):
@@ -190,9 +199,13 @@ class MultimodalInteractionModule(nn.Module):
         proj_drop: float = 0.0,
         drop_path: float = 0.0,
         reweight: str = "mul_mean1",
+        eps: float = 1e-6,
+        use_attn_output_to_update_cls: bool = True,
     ):
         super().__init__()
         self.reweight = reweight
+        self.eps = eps
+        self.use_attn_output_to_update_cls = use_attn_output_to_update_cls
 
         self.cross_attn = nn.MultiheadAttention(
             embed_dim=embed_dim,
@@ -201,7 +214,7 @@ class MultimodalInteractionModule(nn.Module):
             batch_first=True,
         )
 
-        self.q_ln = LayerNorm(embed_dim)
+        self.q_ln  = LayerNorm(embed_dim)
         self.kv_ln = LayerNorm(embed_dim)
 
         self.post_blocks = nn.ModuleList(
@@ -218,41 +231,61 @@ class MultimodalInteractionModule(nn.Module):
             ]
         )
 
-    def forward(self, text_feat, patch_tokens, cls_token, return_cls_states=False):
-        B, M, D = patch_tokens.shape
+    def forward(self, text_feat, visual_tokens, return_cls_states=False):
+        """
+        text_feat: (B, D)  - CLIP text embedding l_p
+        visual_tokens: (B, 1+M, D) - {v~, v1..vM} (CLS + patches)
+        """
+        B, L, D = visual_tokens.shape
+        assert L >= 2, "visual_tokens must contain CLS + at least 1 patch"
+        M = L - 1
 
-        q = self.q_ln(text_feat).unsqueeze(1)   # (B,1,D)
-        kv = self.kv_ln(patch_tokens)           # (B,M,D)
+        # Q from text, K/V from (CLS+patches)
+        q  = self.q_ln(text_feat).unsqueeze(1)       # (B,1,D)
+        kv = self.kv_ln(visual_tokens)              # (B,1+M,D)
 
-        _, attn_w = self.cross_attn(
+        attn_out, attn_w = self.cross_attn(
             query=q, key=kv, value=kv,
             need_weights=True,
-            average_attn_weights=False
+            average_attn_weights=False  # keep heads
         )
-        attn_map = attn_w.mean(dim=1)  # (B,1,M)
+        # attn_w: (B, heads, 1, 1+M)
+        attn_map = attn_w.mean(dim=1)  # (B,1,1+M) aggregate heads (paper: "aggregate attention map")
+
+        # split CLS vs patches
+        cls_token   = visual_tokens[:, :1, :]       # (B,1,D)
+        patch_tokens = visual_tokens[:, 1:, :]      # (B,M,D)
+
+        # optional: update CLS by Z (= attn_out) to match Eq(7) usage
+        if self.use_attn_output_to_update_cls:
+            cls_token = cls_token + attn_out        # (B,1,D)
+
+        # patch attention (exclude CLS), renormalize over patches
+        patch_attn = attn_map[:, :, 1:]             # (B,1,M)
+        patch_attn = patch_attn / (patch_attn.sum(dim=-1, keepdim=True) + self.eps)  # sum=1 over patches
 
         # reweight patches
         if self.reweight == "mul_mean1":
-            scale = (attn_map.squeeze(1) * M).unsqueeze(-1)  # (B,M,1)
-            patch_rw = patch_tokens * scale
+            # mean=1: multiply by M (since sum=1)
+            scale = patch_attn * M                  # (B,1,M)
+            patch_rw = patch_tokens * scale.transpose(1, 2)  # (B,M,1) -> broadcast
         elif self.reweight == "mul":
-            patch_rw = patch_tokens * attn_map.transpose(1, 2)
+            patch_rw = patch_tokens * patch_attn.transpose(1, 2)
         elif self.reweight == "residual":
-            scale = (attn_map.squeeze(1) * M).unsqueeze(-1)
-            patch_rw = patch_tokens * (1.0 + scale)
+            patch_rw = patch_tokens * (1.0 + patch_attn.transpose(1, 2) * M)
         else:
             raise ValueError(f"Unknown reweight mode: {self.reweight}")
 
-        # seq before post blocks
+        # run the 2 transformer blocks after cross-attn (paper)
         seq = torch.cat([cls_token, patch_rw], dim=1)  # (B,1+M,D)
 
-        cls_states = [seq[:, 0, :]]  # state0 (before blocks)
+        cls_states = [seq[:, 0, :]]
         for blk in self.post_blocks:
             seq = blk(seq)
-            cls_states.append(seq[:, 0, :])  # state after each block
+            cls_states.append(seq[:, 0, :])
 
         if return_cls_states:
-            return seq, attn_map, cls_states  # len = 1 + num_blocks
+            return seq, attn_map, cls_states
         return seq, attn_map
 
 class PromptSGModel(nn.Module):
@@ -456,7 +489,9 @@ class PromptSGModel(nn.Module):
 
         # ========== Multimodal Interaction Module (MIM) ==========
         # sequence, attn_map = self.mim(text_feat, patches, cls_token)
-        sequence, attn_map, cls_states = self.mim(text_feat, patches, cls_token, return_cls_states=True)
+        visual_tokens = features_proj          # (B,1+M,512) gồm CLS + patches
+        sequence, attn_map, cls_states = self.mim(text_feat, visual_tokens, return_cls_states=True)
+        v_final = cls_states[-1] 
         
         # Extract final representation from first token (text-enhanced or CLS)
         # v_final = sequence[:, 0, :]   # (batch, 512)
