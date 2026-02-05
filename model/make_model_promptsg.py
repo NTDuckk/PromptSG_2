@@ -336,7 +336,7 @@ class PromptSGModel(nn.Module):
 
         # PromptSG modules
         self.prompt_composer = PromptComposer(clip_model, cfg.MODEL.PROMPTSG.PROMPT_MODE)
-        self.inversion = InversionNetwork(dim=512)  # Luôn là 512 vì CLIP text encoder output 512
+        self.inversion = InversionNetwork(v_dim=512, token_dim=512)  # CLIP joint embedding dim 512 -> token dim 512
 
         # Multimodal Interaction Module (MIM)
         self.mim = MultimodalInteractionModule(
