@@ -64,7 +64,7 @@ class InversionNetwork(nn.Module):
         self.fc1 = nn.Linear(v_dim, hidden)
         self.fc2 = nn.Linear(hidden, hidden)
         self.fc3 = nn.Linear(hidden, token_dim)
-        self.bn = nn.BatchNorm1d(token_dim, affine=False)
+        self.bn = nn.BatchNorm1d(token_dim, affine=True)
         self.act = nn.ReLU(inplace=True)
 
     def forward(self, v):
@@ -410,9 +410,7 @@ class PromptSGModel(nn.Module):
             
             # Patches for cross-attention (exclude CLS token)
             patches = features_proj[:, 1:]  # (batch, num_patches, 512)
-             
-            # CLS token for final sequence
-            cls_token = features_proj[:, :1]  # (batch, 1, 512)
+
             
         elif self.model_name == 'RN50':
             # ResNet50: global feature + spatial features
@@ -495,8 +493,7 @@ class PromptSGModel(nn.Module):
         
         # Extract final representation from first token (text-enhanced or CLS)
         # v_final = sequence[:, 0, :]   # (batch, 512)
-        triplet_feats = [cls_states[-1], cls_states[-2], cls_states[-3]]
-        v_final = cls_states[-1]
+        # triplet_feats = [cls_states[-1], cls_states[-2], cls_states[-3]]
         
         # ========== Bottleneck Layers ==========
         # Dùng img_feature (768/2048) cho bottleneck chính
@@ -528,7 +525,7 @@ class PromptSGModel(nn.Module):
 
             #processor đang nhận: cls_score, triplet_feats, image_feat, text_feat, target.  
             # return [cls_score, cls_score_proj], [CLS_intermediate, CLS_final, v_final], v_final, text_feat
-            return [cls_score_proj], triplet_feats, v, text_feat
+            return [cls_score, cls_score_proj], [CLS_intermediate, CLS_final, CLS_proj], v, text_feat
 
         else:
             if self.neck_feat == 'after':
