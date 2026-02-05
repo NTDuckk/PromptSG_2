@@ -40,18 +40,21 @@ class TextEncoder(nn.Module):
         self.text_projection = clip_model.text_projection
         self.dtype = clip_model.dtype
 
-    def forward(self, prompts, tokenized_prompts):
+    def forward(self, prompts, tokenized_prompts, return_tokens: bool = False):
         x = prompts + self.positional_embedding.type(self.dtype)
         x = x.permute(1, 0, 2)
         x = self.transformer(x)
         x = x.permute(1, 0, 2)
         x = self.ln_final(x).type(self.dtype)
-        # x = x[torch.arange(x.shape[0], device=x.device), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
-        # x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection 
-        # return x
-        idx = torch.arange(x.shape[0], device=x.device)
-        x = x[idx, tokenized_prompts.argmax(dim=-1)] @ self.text_projection
-        return x
+
+        tokens_proj = x @ self.text_projection              # (B, L, D)
+        eot_idx = tokenized_prompts.argmax(dim=-1)          # (B,)
+        pooled = tokens_proj[torch.arange(tokens_proj.size(0), device=tokens_proj.device), eot_idx]  # (B, D)
+
+        if not return_tokens:
+            return pooled
+        return pooled, tokens_proj, eot_idx
+
 
 
 class InversionNetwork(nn.Module):
@@ -154,139 +157,148 @@ class QuickGELU(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(1.702 * x)
 
-class PostCABlock(nn.Module):
-    """ViT-style Encoder block: PreLN -> SelfAttn -> MLP"""
-    def __init__(self, d_model=512, nhead=8, mlp_ratio=4.0, drop_path=0.0, attn_drop=0.0, proj_drop=0.0):
+class CoAttentionLayer(nn.Module):
+    def __init__(self, d_model=512, nhead=8, mlp_ratio=4.0, attn_drop=0.0, proj_drop=0.0, drop_path=0.0):
         super().__init__()
-        self.ln1 = LayerNorm(d_model)
-        self.attn = nn.MultiheadAttention(
-            embed_dim=d_model,
-            num_heads=nhead,
-            dropout=attn_drop,
-            batch_first=True
-        )
-
-        self.ln2 = LayerNorm(d_model)
-        hidden = int(d_model * mlp_ratio)
-        self.mlp = nn.Sequential(
-            nn.Linear(d_model, hidden),
-            QuickGELU(),
-            nn.Dropout(proj_drop),
-            nn.Linear(hidden, d_model),
-            nn.Dropout(proj_drop),
-        )
-
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
-    def forward(self, x):
-        # Self-attn
-        x_norm = self.ln1(x)
-        attn_out, _ = self.attn(x_norm, x_norm, x_norm, need_weights=False)
-        x = x + self.drop_path(attn_out)
+        # ---- visual stream ----
+        self.v_ln1 = LayerNorm(d_model)
+        self.v_self = nn.MultiheadAttention(d_model, nhead, dropout=attn_drop, batch_first=True)
 
-        # FFN
-        x = x + self.drop_path(self.mlp(self.ln2(x)))
-        return x
+        self.v_ln2q = LayerNorm(d_model)
+        self.v_ln2kv = LayerNorm(d_model)
+        self.v_cross = nn.MultiheadAttention(d_model, nhead, dropout=attn_drop, batch_first=True)
 
-class MultimodalInteractionModule(nn.Module):
-    def __init__(
-        self,
-        embed_dim: int,
-        num_heads: int,
-        num_blocks: int = 2,
-        mlp_ratio: float = 4.0,
-        attn_drop: float = 0.0,
-        proj_drop: float = 0.0,
-        drop_path: float = 0.0,
-        reweight: str = "mul_mean1",
-        eps: float = 1e-6,
-        use_attn_output_to_update_cls: bool = True,
-    ):
+        self.v_ln3 = LayerNorm(d_model)
+        hidden = int(d_model * mlp_ratio)
+        self.v_ffn = nn.Sequential(
+            nn.Linear(d_model, hidden), QuickGELU(), nn.Dropout(proj_drop),
+            nn.Linear(hidden, d_model), nn.Dropout(proj_drop),
+        )
+
+        # ---- text stream ----
+        self.t_ln1 = LayerNorm(d_model)
+        self.t_self = nn.MultiheadAttention(d_model, nhead, dropout=attn_drop, batch_first=True)
+
+        self.t_ln2q = LayerNorm(d_model)
+        self.t_ln2kv = LayerNorm(d_model)
+        self.t_cross = nn.MultiheadAttention(d_model, nhead, dropout=attn_drop, batch_first=True)
+
+        self.t_ln3 = LayerNorm(d_model)
+        self.t_ffn = nn.Sequential(
+            nn.Linear(d_model, hidden), QuickGELU(), nn.Dropout(proj_drop),
+            nn.Linear(hidden, d_model), nn.Dropout(proj_drop),
+        )
+
+    def forward(self, v_tokens, t_tokens, return_t2v_attn=False):
+        # v self
+        v_norm = self.v_ln1(v_tokens)
+        v_sa, _ = self.v_self(v_norm, v_norm, v_norm, need_weights=False)
+        v_tokens = v_tokens + self.drop_path(v_sa)
+
+        # v cross: v <- attend(t)
+        v_q = self.v_ln2q(v_tokens)
+        t_kv = self.v_ln2kv(t_tokens)
+        v_ca, _ = self.v_cross(v_q, t_kv, t_kv, need_weights=False)
+        v_tokens = v_tokens + self.drop_path(v_ca)
+
+        # v ffn
+        v_tokens = v_tokens + self.drop_path(self.v_ffn(self.v_ln3(v_tokens)))
+
+        # t self
+        t_norm = self.t_ln1(t_tokens)
+        t_sa, _ = self.t_self(t_norm, t_norm, t_norm, need_weights=False)
+        t_tokens = t_tokens + self.drop_path(t_sa)
+
+        # t cross: t <- attend(v)
+        t_q = self.t_ln2q(t_tokens)
+        v_kv = self.t_ln2kv(v_tokens)
+
+        # return attention weights from t->v if requested
+        if return_t2v_attn:
+            t_ca, attn_w = self.t_cross(t_q, v_kv, v_kv, need_weights=True, average_attn_weights=False)
+        else:
+            t_ca, attn_w = self.t_cross(t_q, v_kv, v_kv, need_weights=False)
+
+        t_tokens = t_tokens + self.drop_path(t_ca)
+        t_tokens = t_tokens + self.drop_path(self.t_ffn(self.t_ln3(t_tokens)))
+
+        return v_tokens, t_tokens, attn_w
+
+class CoAttentionInteractionModule(nn.Module):
+    def __init__(self, embed_dim=512, num_heads=8, num_layers=2, mlp_ratio=4.0, attn_drop=0.0, proj_drop=0.0,
+                 drop_path=0.0, reweight="mul_mean1", eps=1e-6, update_cls_by_attn=True):
         super().__init__()
         self.reweight = reweight
         self.eps = eps
-        self.use_attn_output_to_update_cls = use_attn_output_to_update_cls
+        self.update_cls_by_attn = update_cls_by_attn
 
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=embed_dim,
-            num_heads=num_heads,
-            dropout=attn_drop,
-            batch_first=True,
-        )
-
+        # for hybrid PromptSG-style reweight map: pooled_text (B,D) attends to visual_tokens (B,1+M,D)
+        self.map_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=attn_drop, batch_first=True)
         self.q_ln  = LayerNorm(embed_dim)
         self.kv_ln = LayerNorm(embed_dim)
 
-        self.post_blocks = nn.ModuleList(
-            [
-                PostCABlock(
-                    d_model=embed_dim,
-                    nhead=num_heads,
-                    mlp_ratio=mlp_ratio,
-                    drop_path=drop_path,
-                    attn_drop=attn_drop,
-                    proj_drop=proj_drop,
-                )
-                for _ in range(num_blocks)
-            ]
-        )
+        self.layers = nn.ModuleList([
+            CoAttentionLayer(embed_dim, num_heads, mlp_ratio, attn_drop, proj_drop, drop_path)
+            for _ in range(num_layers)
+        ])
 
-    def forward(self, text_feat, visual_tokens, return_cls_states=False):
-        """
-        text_feat: (B, D)  - CLIP text embedding l_p
-        visual_tokens: (B, 1+M, D) - {v~, v1..vM} (CLS + patches)
-        """
+    def _reweight_visual(self, pooled_text, visual_tokens):
         B, L, D = visual_tokens.shape
-        assert L >= 2, "visual_tokens must contain CLS + at least 1 patch"
         M = L - 1
+        q  = self.q_ln(pooled_text).unsqueeze(1)  # (B,1,D)
+        kv = self.kv_ln(visual_tokens)
 
-        # Q from text, K/V from (CLS+patches)
-        q  = self.q_ln(text_feat).unsqueeze(1)       # (B,1,D)
-        kv = self.kv_ln(visual_tokens)              # (B,1+M,D)
+        attn_out, attn_w = self.map_attn(q, kv, kv, need_weights=True, average_attn_weights=False)
+        attn_map = attn_w.mean(dim=1)  # (B,1,1+M)
 
-        attn_out, attn_w = self.cross_attn(
-            query=q, key=kv, value=kv,
-            need_weights=True,
-            average_attn_weights=False  # keep heads
-        )
-        # attn_w: (B, heads, 1, 1+M)
-        attn_map = attn_w.mean(dim=1)  # (B,1,1+M) aggregate heads (paper: "aggregate attention map")
+        cls_token = visual_tokens[:, :1, :]
+        patch_tok = visual_tokens[:, 1:, :]
 
-        # split CLS vs patches
-        cls_token   = visual_tokens[:, :1, :]       # (B,1,D)
-        patch_tokens = visual_tokens[:, 1:, :]      # (B,M,D)
+        if self.update_cls_by_attn:
+            cls_token = cls_token + attn_out
 
-        # optional: update CLS by Z (= attn_out) to match Eq(7) usage
-        if self.use_attn_output_to_update_cls:
-            cls_token = cls_token + attn_out        # (B,1,D)
+        patch_attn = attn_map[:, :, 1:]  # (B,1,M)
+        patch_attn = patch_attn / (patch_attn.sum(dim=-1, keepdim=True) + self.eps)
 
-        # patch attention (exclude CLS), renormalize over patches
-        patch_attn = attn_map[:, :, 1:]             # (B,1,M)
-        patch_attn = patch_attn / (patch_attn.sum(dim=-1, keepdim=True) + self.eps)  # sum=1 over patches
-
-        # reweight patches
         if self.reweight == "mul_mean1":
-            # mean=1: multiply by M (since sum=1)
-            scale = patch_attn * M                  # (B,1,M)
-            patch_rw = patch_tokens * scale.transpose(1, 2)  # (B,M,1) -> broadcast
+            scale = patch_attn * M
+            patch_rw = patch_tok * scale.transpose(1, 2)
         elif self.reweight == "mul":
-            patch_rw = patch_tokens * patch_attn.transpose(1, 2)
+            patch_rw = patch_tok * patch_attn.transpose(1, 2)
         elif self.reweight == "residual":
-            patch_rw = patch_tokens * (1.0 + patch_attn.transpose(1, 2) * M)
+            patch_rw = patch_tok * (1.0 + patch_attn.transpose(1, 2) * M)
         else:
             raise ValueError(f"Unknown reweight mode: {self.reweight}")
 
-        # run the 2 transformer blocks after cross-attn (paper)
-        seq = torch.cat([cls_token, patch_rw], dim=1)  # (B,1+M,D)
+        return torch.cat([cls_token, patch_rw], dim=1), attn_map
 
-        cls_states = [seq[:, 0, :]]
-        for blk in self.post_blocks:
-            seq = blk(seq)
-            cls_states.append(seq[:, 0, :])
+    def forward(self, pooled_text, text_tokens, visual_tokens, style="pure", return_cls_states=False):
+        # style: "pure" (METER co-attn) | "hybrid" (PromptSG reweight + co-attn)
+        attn_map = None
+        if style == "hybrid":
+            visual_tokens, attn_map = self._reweight_visual(pooled_text, visual_tokens)
+
+        cls_states = [visual_tokens[:, 0, :]]
+        last_t2v = None
+
+        for li, layer in enumerate(self.layers):
+            need_attn = (attn_map is None and li == len(self.layers) - 1)  # only compute once if pure
+            visual_tokens, text_tokens, t2v_attn = layer(visual_tokens, text_tokens, return_t2v_attn=need_attn)
+            cls_states.append(visual_tokens[:, 0, :])
+            if need_attn:
+                last_t2v = t2v_attn  # (B,heads,Lt,Lv)
+
+        # if pure, build attn_map from last layer t->v cross-attn
+        if attn_map is None and last_t2v is not None:
+            # mean heads then mean text queries => (B,1,Lv)
+            attn_map = last_t2v.mean(dim=1).mean(dim=2, keepdim=True)
 
         if return_cls_states:
-            return seq, attn_map, cls_states
-        return seq, attn_map
+            return visual_tokens, attn_map, cls_states
+        return visual_tokens, attn_map
+
 
 class PromptSGModel(nn.Module):
     def __init__(self, num_classes, camera_num, view_num, cfg):
@@ -339,27 +351,47 @@ class PromptSGModel(nn.Module):
         self.inversion = InversionNetwork(v_dim=512, token_dim=512)  # CLIP joint embedding dim 512 -> token dim 512
 
         # Multimodal Interaction Module (MIM)
-        self.mim = MultimodalInteractionModule(
-            embed_dim=512,  # Luôn là 512 cho CLIP
+        self.interaction = CoAttentionInteractionModule(
+            embed_dim=512,
             num_heads=cfg.MODEL.PROMPTSG.CROSS_ATTN_HEADS,
-            num_blocks=cfg.MODEL.PROMPTSG.POST_CA_BLOCKS
+            num_layers=getattr(cfg.MODEL.PROMPTSG, "COATTN_LAYERS", cfg.MODEL.PROMPTSG.POST_CA_BLOCKS),
+            reweight=getattr(cfg.MODEL.PROMPTSG, "REWEIGHT_MODE", "mul_mean1"),
         )
+
         
+        # modes
+        self.coattn_text_mode = getattr(cfg.MODEL.PROMPTSG, "COATTN_TEXT_MODE", "eot")   # "full" | "eot"
+        self.coattn_style     = getattr(cfg.MODEL.PROMPTSG, "COATTN_STYLE", "hybrid")   # "pure" | "hybrid"
+
         for p in self.text_encoder.parameters():
             p.requires_grad_(False)
         self.text_encoder.eval()
 
         # Cache for simplified prompt
+        self._text_cache = None
         self._text_feat_cached = None
 
     def _ensure_text_features(self):
-        if self._text_feat_cached is None:
+        if self._text_cache is None:
             self.prompt_composer._ensure_embeddings()
             with torch.no_grad():
-                prompts = self.prompt_composer.embed_simplified  # (1,L,512)
-                tokenized = self.prompt_composer.tokenized_simplified  # (1,L)
-                text = self.text_encoder(prompts, tokenized)  # (1,512)
-            self._text_feat_cached = text.detach().cpu()
+                prompts = self.prompt_composer.embed_simplified
+                tokenized = self.prompt_composer.tokenized_simplified
+                pooled, tokens, eot_idx = self.text_encoder(prompts, tokenized, return_tokens=True)
+
+            pooled_cpu = pooled.detach().cpu()
+            tokens_cpu = tokens.detach().cpu()
+            eot_idx_cpu = eot_idx.detach().cpu()
+            eot_token_cpu = tokens_cpu[torch.arange(tokens_cpu.size(0)), eot_idx_cpu].unsqueeze(1)  # (1,1,D)
+
+            self._text_cache = {
+                "pooled": pooled_cpu,
+                "tokens": tokens_cpu,
+                "eot_idx": eot_idx_cpu,
+                "eot_token": eot_token_cpu,
+            }
+            self._text_feat_cached = pooled_cpu
+
 
 
     def forward(self, x = None, label=None, get_image=False, get_text=False, cam_label=None, view_label=None):
@@ -376,6 +408,7 @@ class PromptSGModel(nn.Module):
                 # image_features_last, image_features, image_features_proj = self.image_encoder(x)
                 features_intermediate, features_final, features_proj= self.image_encoder(x)
                 v = features_proj[:, 0] if self.model_name == 'ViT-B-16' else features_proj[0]
+                # for RN50 v = self.inversion_projection(features_proj[0]) 
                 s_star = self.inversion(v)
                 prompts, tokenized = self.prompt_composer(s_star)
                 # with torch.no_grad():
@@ -397,6 +430,8 @@ class PromptSGModel(nn.Module):
         # image_features_last, image_features, image_features_proj = self.image_encoder(x)
         features_intermediate, features_final, features_proj = self.image_encoder(x)
 
+        device = x.device
+        B = x.size(0)
         # Extract features based on backbone type
         if self.model_name == 'ViT-B-16':
             # ViT-B/16: [CLS] token + patch tokens
@@ -410,7 +445,6 @@ class PromptSGModel(nn.Module):
             
             # Patches for cross-attention (exclude CLS token)
             patches = features_proj[:, 1:]  # (batch, num_patches, 512)
-
             
         elif self.model_name == 'RN50':
             # ResNet50: global feature + spatial features
@@ -478,18 +512,38 @@ class PromptSGModel(nn.Module):
         # Generate text features based on prompt mode
         if self.prompt_mode == 'simplified':
             self._ensure_text_features()
-            device = x.device if x is not None else next(self.parameters()).device
-            text_feat = self._text_feat_cached.to(device).expand(x.shape[0], -1)
+            cache = self._text_cache
+            text_feat = cache["pooled"].to(device).expand(B, -1)
+            if self.coattn_text_mode == "full":
+                text_tokens = cache["tokens"].to(device).expand(B, -1, -1)
+            else:
+                text_tokens = cache["eot_token"].to(device).expand(B, -1, -1)
+
         else:
             s_star = self.inversion(v)  # Generate pseudo token (512)
             prompts, tokenized = self.prompt_composer(s_star)
-            text_feat = self.text_encoder(prompts, tokenized)  # (batch, 512)
+            pooled, tokens, eot_idx = self.text_encoder(prompts, tokenized, return_tokens=True)
+            text_feat = pooled
+            if self.coattn_text_mode == "full":
+                text_tokens = tokens
+            elif self.coattn_text_mode == "eot":
+                text_tokens = tokens[torch.arange(tokens.size(0), device=tokens.device), eot_idx].unsqueeze(1)  # (batch, 512)
 
-        # ========== Multimodal Interaction Module (MIM) ==========
-        # sequence, attn_map = self.mim(text_feat, patches, cls_token)
-        visual_tokens = features_proj          # (B,1+M,512) gồm CLS + patches
-        sequence, attn_map, cls_states = self.mim(text_feat, visual_tokens, return_cls_states=True)
-        v_final = cls_states[-1] 
+        # ========== Multimodal Interaction Module (Co-Attention) ==========
+        if self.model_name == "ViT-B-16":
+            visual_tokens = features_proj              # (B, 1+M, 512)
+        else:
+            visual_tokens = torch.cat([cls_token, patches], dim=1)  # (B, 1+M, 512)          # (B,1+M,512) gồm CLS + patches
+
+
+        v_tokens_out, attn_map, cls_states = self.interaction(
+            pooled_text=text_feat,
+            text_tokens=text_tokens,
+            visual_tokens=visual_tokens,
+            style=self.coattn_style,
+            return_cls_states=True,
+        )
+        v_final = cls_states[-1]
         
         # Extract final representation from first token (text-enhanced or CLS)
         # v_final = sequence[:, 0, :]   # (batch, 512)
@@ -498,7 +552,6 @@ class PromptSGModel(nn.Module):
         # ========== Bottleneck Layers ==========
         # Dùng img_feature (768/2048) cho bottleneck chính
         # Dùng v_final (512) cho bottleneck projection
-
         # feat = self.bottleneck(img_feature)  # (batch, in_planes)
         feat = self.bottleneck(CLS_final) #CLS_final: CLS x12 - 768
 
@@ -525,7 +578,7 @@ class PromptSGModel(nn.Module):
 
             #processor đang nhận: cls_score, triplet_feats, image_feat, text_feat, target.  
             # return [cls_score, cls_score_proj], [CLS_intermediate, CLS_final, v_final], v_final, text_feat
-            return [cls_score, cls_score_proj], [CLS_intermediate, CLS_final, CLS_proj], v, text_feat
+            return [cls_score, cls_score_proj], [CLS_intermediate, CLS_final, v_final], v, text_feat
 
         else:
             if self.neck_feat == 'after':

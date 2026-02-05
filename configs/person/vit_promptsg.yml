@@ -10,6 +10,11 @@ MODEL:
     TEMPERATURE: 0.1
     CROSS_ATTN_HEADS: 8
     POST_CA_BLOCKS: 2
+    COATTN_TEXT_MODE: "full"     # "full" | "eot"
+    COATTN_STYLE: "pure"         # "pure" | "hybrid"
+    COATTN_LAYERS: 2             # số layer co-attn (paper 2 thường >2, PromptSG default 2)
+    REWEIGHT_MODE: "mul_mean1"   # giữ giống PromptSG
+    ENABLE_SUPCON_IN_SIMPLIFIED: false  # PromptSG paper: inference simplified, train composed
 
 INPUT:
   SIZE_TRAIN: [256, 128]
