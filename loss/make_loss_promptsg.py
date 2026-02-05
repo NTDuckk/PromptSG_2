@@ -64,6 +64,12 @@ def make_loss(cfg, num_classes):
                         loss_t2i = supcon_loss(txt, img, target, target)
                         SUPCON_LOSS = loss_i2t + loss_t2i
                         total_loss = total_loss + cfg.MODEL.PROMPTSG.LAMBDA_SUPCON * SUPCON_LOSS
+                
+                return total_loss, {
+                    'id_loss': ID_LOSS.detach(),
+                    'tri_loss': TRI_LOSS.detach(),
+                    'supcon_loss': SUPCON_LOSS.detach()
+                }
 
     else:
         print('expected sampler should be softmax, triplet, softmax_triplet or softmax_triplet_center'
