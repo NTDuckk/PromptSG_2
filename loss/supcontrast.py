@@ -64,59 +64,100 @@ import torch.nn.functional as F
 
 #         return -mean_log_prob_pos.mean()
 
-class SupConLoss(nn.Module):
-    def __init__(self, device, temperature=0.1, eps=1e-12, normalize=True):
+class SupConLoss(torch.nn.Module):
+    def __init__(self, temperature=0.07, eps=1e-12, normalize=True):
         super().__init__()
-        self.device = device
         self.temperature = temperature
         self.eps = eps
         self.normalize = normalize
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     def forward(self, anchor_feat, cand_feat, anchor_label, cand_label):
         """
-        Supervised Contrastive Loss (Equation 5-6 in paper)
+        Supervised Contrastive Loss (Equations 5-6 in PromptSG paper)
         
         Args:
-            anchor_feat: (B1, D) - features của anchor (ví dụ: images)
-            cand_feat: (B2, D)   - features của candidate (ví dụ: texts)
+            anchor_feat: (B1, D) - features của anchor
+            cand_feat: (B2, D) - features của candidate  
             anchor_label: (B1,) - labels của anchor
-            cand_label: (B2,)   - labels của candidate
+            cand_label: (B2,) - labels của candidate
         """
         if self.normalize:
             anchor_feat = F.normalize(anchor_feat, dim=1)
             cand_feat = F.normalize(cand_feat, dim=1)
 
-        B1 = anchor_feat.size(0)
-        B2 = cand_feat.size(0)
+        B1, B2 = anchor_feat.size(0), cand_feat.size(0)
         
-        # Tính similarity matrix
+        # Similarity matrix
         sim_matrix = torch.matmul(anchor_feat, cand_feat.t()) / self.temperature  # (B1, B2)
         
-        # Tạo mask cho positive pairs (cùng identity)
+        # Positive mask: same identity
         mask = torch.eq(
             anchor_label.unsqueeze(1).expand(B1, B2),
             cand_label.unsqueeze(0).expand(B1, B2)
         ).float().to(self.device)  # (B1, B2)
         
-        # Eq. 5: Tính loss cho image-to-text
-        # Tính log_softmax
-        exp_sim = torch.exp(sim_matrix)  # (B1, B2)
-        log_prob = sim_matrix - torch.log(exp_sim.sum(dim=1, keepdim=True) + self.eps)  # (B1, B2)
+        # Log softmax over candidates
+        logits = F.log_softmax(sim_matrix, dim=1)  # (B1, B2)
         
-        # Chỉ lấy positive pairs (sum over p in P(i))
-        # Tính mean log probability cho mỗi anchor
-        log_prob_pos = mask * log_prob  # (B1, B2)
+        # Loss: - sum over positive pairs, then average per anchor
+        loss_pos = - (mask * logits).sum(dim=1)  # (B1,) sum over positives
         
-        # Số lượng positive cho mỗi anchor
-        num_pos = mask.sum(dim=1)  # (B1,)
+        # Normalize by number of positives (avoid division by zero)
+        num_pos = mask.sum(dim=1).clamp(min=1.0)
+        loss_per_anchor = loss_pos / num_pos
         
-        # Tránh chia cho 0: nếu không có positive nào, đặt loss = 0
-        num_pos = torch.clamp(num_pos, min=1.0)
-        
-        # Loss cho từng anchor
-        loss_per_anchor = -log_prob_pos.sum(dim=1) / num_pos  # (B1,)
-        
-        # Tổng loss
+        # Average over all anchors
         loss = loss_per_anchor.mean()
         
         return loss
+
+
+def symmetric_supervised_contrastive_loss(v_features, l_features, labels, temperature=0.07, eps=1e-12):
+    """
+    Symmetric Supervised Contrastive Loss (Equation 4-5 in PromptSG paper)
+    
+    Args:
+        v_features: visual features (B, D)
+        l_features: text features (B, D)
+        labels: identity labels (B,)
+        temperature: temperature parameter τ
+        eps: small value for numerical stability
+    """
+    batch_size = v_features.size(0)
+    
+    # Normalize features (cosine similarity)
+    v_norm = F.normalize(v_features, dim=1)  # (B, D)
+    l_norm = F.normalize(l_features, dim=1)  # (B, D)
+    
+    # Create positive mask: 1 for same identity, 0 otherwise
+    labels = labels.view(-1, 1)  # (B, 1)
+    mask = torch.eq(labels, labels.T).float().to(v_features.device)  # (B, B)
+    
+    # Image-to-Text loss (Eq. 5, first part)
+    sim_i2t = torch.matmul(v_norm, l_norm.T) / temperature  # (B, B)
+    
+    # Log softmax with positive pairs
+    logits_i2t = F.log_softmax(sim_i2t, dim=1)  # (B, B)
+    
+    # Only sum over positive pairs (P(i))
+    loss_i2t = - (mask * logits_i2t).sum(dim=1)  # (B,)
+    
+    # Normalize by number of positive pairs (avoid division by zero)
+    num_pos = mask.sum(dim=1)  # (B,)
+    num_pos = torch.clamp(num_pos, min=1.0)
+    loss_i2t = loss_i2t / num_pos
+    loss_i2t = loss_i2t.mean()
+    
+    # Text-to-Image loss (Eq. 5, second part)
+    sim_t2i = torch.matmul(l_norm, v_norm.T) / temperature  # (B, B)
+    logits_t2i = F.log_softmax(sim_t2i, dim=1)  # (B, B)
+    
+    loss_t2i = - (mask * logits_t2i).sum(dim=1)  # (B,)
+    loss_t2i = loss_t2i / num_pos
+    loss_t2i = loss_t2i.mean()
+    
+    # Total loss (Eq. 4)
+    loss = (loss_i2t + loss_t2i)
+    
+    return loss

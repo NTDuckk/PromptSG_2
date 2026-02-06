@@ -114,3 +114,52 @@ if __name__ == '__main__':
         num_query,
         args.local_rank,
     )
+
+    # After training completes, run gradient check and plotting
+    import subprocess
+    import glob
+
+    print("\n" + "="*50)
+    print("TRAINING COMPLETED - RUNNING POST-TRAINING TASKS")
+    print("="*50)
+
+    # 1. Check gradients
+    print("Running gradient check...")
+    try:
+        result = subprocess.run(['python', 'check_grad.py'], capture_output=True, text=True)
+        print("Gradient check output:")
+        print(result.stdout)
+        if result.stderr:
+            print("Errors:", result.stderr)
+    except Exception as e:
+        print(f"Failed to run gradient check: {e}")
+
+    # 2. Generate plots
+    print("\nRunning learning curve plotting...")
+    try:
+        # Find the latest log file in output_dir
+        log_files = glob.glob(os.path.join(output_dir, '**', '*.log'), recursive=True) + \
+                   glob.glob(os.path.join(output_dir, '**', '*metrics*.txt'), recursive=True)
+        
+        if log_files:
+            latest_log = max(log_files, key=os.path.getctime)
+            print(f"Found log file: {latest_log}")
+            
+            result = subprocess.run([
+                'python', 'plot_learning_curves.py', 
+                '--log_file', latest_log, 
+                '--output_dir', os.path.join(output_dir, 'plots')
+            ], capture_output=True, text=True)
+            
+            print("Plotting output:")
+            print(result.stdout)
+            if result.stderr:
+                print("Errors:", result.stderr)
+        else:
+            print("No log files found for plotting")
+    except Exception as e:
+        print(f"Failed to run plotting: {e}")
+
+    print("\n" + "="*50)
+    print("ALL TASKS COMPLETED")
+    print("="*50)

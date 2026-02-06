@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from .softmax_loss import CrossEntropyLabelSmooth, LabelSmoothingCrossEntropy
 from .triplet_loss import TripletLoss
-from .supcontrast import SupConLoss
+from .supcontrast import SupConLoss, symmetric_supervised_contrastive_loss
 
 
 def make_loss(cfg, num_classes):
@@ -58,11 +58,11 @@ def make_loss(cfg, num_classes):
 
                 if (image_feat is not None) and (text_feat is not None):
                     if (prompt_mode != "simplified") or enable_supcon_in_simplified:
-                        img = F.normalize(image_feat, dim=1)
-                        txt = F.normalize(text_feat, dim=1)
-                        loss_i2t = supcon_loss(img, txt, target, target)
-                        loss_t2i = supcon_loss(txt, img, target, target)
-                        SUPCON_LOSS = loss_i2t + loss_t2i
+                        # Use symmetric supervised contrastive loss (Equation 4-5)
+                        SUPCON_LOSS = symmetric_supervised_contrastive_loss(
+                            image_feat, text_feat, target, 
+                            temperature=supcon_loss.temperature
+                        )
                         total_loss = total_loss + cfg.MODEL.PROMPTSG.LAMBDA_SUPCON * SUPCON_LOSS
                 
                 return total_loss, {
