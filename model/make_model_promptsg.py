@@ -111,7 +111,18 @@ class FixedPromptComposer(nn.Module):
         fixed_ids = self.token_ids.clone()
         fixed_ids[0, self.x_pos] = clip_module.tokenize(["person"])[0, 1].item()  # Replace X with person token
         fixed_ids = fixed_ids.to(self.token_embedding.weight.device)  # Move to same device as embedding
-        self.fixed_embeddings = self.token_embedding(fixed_ids).type(self.dtype)
+        with torch.no_grad():
+            fixed_emb = self.token_embedding(fixed_ids).type(self.dtype)
+
+        # QUAN TRỌNG: cắt graph để không bị backward qua graph cũ ở iter sau
+        fixed_emb = fixed_emb.detach()
+
+        # Nên lưu dạng buffer để:
+        # (1) model.to(device) sẽ tự move nó
+        # (2) không có grad
+        self.register_buffer("fixed_embeddings", fixed_emb)
+        self.register_buffer("token_ids", self.token_ids)
+
     
     def forward(self, s_star):
         """
