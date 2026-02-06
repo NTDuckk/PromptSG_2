@@ -78,63 +78,54 @@ class InversionNetwork(nn.Module):
         return x
 
 
-
 class FixedPromptComposer(nn.Module):
     def __init__(self, clip_model):
         super().__init__()
         self.token_embedding = clip_model.token_embedding
         self.dtype = clip_model.dtype
-        
+
         # Tokenize template parts
         self.template = "A photo of a {} person"
         self.prefix = "A photo of a"
         self.suffix = "person"
-        
+
         # Tokenize từng phần
         import model.clip.clip as clip_module
         prefix_tokens = clip_module.tokenize([self.prefix])[0, 1:-1].tolist()  # exclude SOT and EOT
         suffix_tokens = clip_module.tokenize([self.suffix])[0, 1:-1].tolist()
-        
+
         # CLIP special tokens
         self.sot_token = clip_module.tokenize([""])[0, 0].item()
         self.eot_token = clip_module.tokenize([""])[0, -1].item()
-        
+
         # Tạo token sequence: [SOT] + prefix + [X] + suffix + [EOT]
         self.composed_str = self.template.format("X")
-        self.token_ids = clip_module.tokenize([self.composed_str])
-        
+        token_ids = clip_module.tokenize([self.composed_str])  # IMPORTANT: local var (avoid buffer name conflict)
+
         # Find position of X in tokenized sequence
         prefix_str = self.composed_str[:self.composed_str.find("X")]
         prefix_ids = clip_module.tokenize([prefix_str])
         self.x_pos = prefix_ids.shape[1] - 1  # Token position of X
-        
-        fixed_ids = self.token_ids.clone()
+
+        fixed_ids = token_ids.clone()
         fixed_ids[0, self.x_pos] = clip_module.tokenize(["person"])[0, 1].item()  # Replace X with person token
         fixed_ids = fixed_ids.to(self.token_embedding.weight.device)  # Move to same device as embedding
+
+        # Build a fixed (no-grad) prompt embedding once, then store as buffers
         with torch.no_grad():
             fixed_emb = self.token_embedding(fixed_ids).type(self.dtype)
 
-        # QUAN TRỌNG: cắt graph để không bị backward qua graph cũ ở iter sau
         fixed_emb = fixed_emb.detach()
-
-        # Nên lưu dạng buffer để:
-        # (1) model.to(device) sẽ tự move nó
-        # (2) không có grad
         self.register_buffer("fixed_embeddings", fixed_emb)
-        self.register_buffer("token_ids", self.token_ids)
+        self.register_buffer("token_ids", token_ids)
 
-    
     def forward(self, s_star):
-        """
-        s_star: (B, D) pseudo token
-        """
         B = s_star.size(0)
         L = self.fixed_embeddings.size(1)
-        
-        # Tạo prompts bằng cách thay thế embedding tại vị trí X
+
         prompts = self.fixed_embeddings.expand(B, L, -1).clone()
         prompts[:, self.x_pos, :] = s_star
-        
+
         tokenized = self.token_ids.expand(B, -1)
         return prompts, tokenized
 
