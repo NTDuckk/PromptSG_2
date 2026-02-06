@@ -100,15 +100,16 @@ class FixedPromptComposer(nn.Module):
         self.eot_token = clip_module.tokenize([""])[0, -1].item()
         
         # Tạo token sequence: [SOT] + prefix + [X] + suffix + [EOT]
-        self.token_ids = torch.tensor([
-            [self.sot_token] + prefix_tokens + [0] + suffix_tokens + [self.eot_token]
-        ])  # [1, L], với 0 là placeholder cho X
+        self.composed_str = self.template.format("X")
+        self.token_ids = clip_module.tokenize([self.composed_str])
         
-        self.x_pos = len(prefix_tokens) + 1  # vị trí của [X]
+        # Find position of X in tokenized sequence
+        prefix_str = self.composed_str[:self.composed_str.find("X")]
+        prefix_ids = clip_module.tokenize([prefix_str])
+        self.x_pos = prefix_ids.shape[1] - 1  # Token position of X
         
-        # Embedding cho phần cố định
         fixed_ids = self.token_ids.clone()
-        fixed_ids[0, self.x_pos] = clip_module.tokenize(["person"])[0, 1].item()  # tạm thời
+        fixed_ids[0, self.x_pos] = clip_module.tokenize(["person"])[0, 1].item()  # Replace X with person token
         self.fixed_embeddings = self.token_embedding(fixed_ids).type(self.dtype)
     
     def forward(self, s_star):
