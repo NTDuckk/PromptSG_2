@@ -305,6 +305,22 @@ class PromptSGModel(nn.Module):
         # Loại bỏ các mode không cần thiết
         # Giữ lại coattn_text_mode để chọn dùng EOT hay full sequence
         self.coattn_text_mode = getattr(cfg.MODEL.PROMPTSG, "COATTN_TEXT_MODE", "eot")
+        
+        # ========== ADD THESE PROJECTIONS ==========
+        # For ResNet50 specific projections
+        if self.model_name == 'RN50':
+            self.inversion_projection = nn.Linear(1024, 512)  # Project from 1024 to 512 for inversion
+            self.resnet_projection = nn.Linear(1024, 512)    # Project CLS token from 1024 to 512
+            self.patch_projection = nn.Linear(1024, 512)     # Project patches from 1024 to 512
+            self.final_projection = nn.Linear(512, 1024)     # Project back from 512 to 1024 for bottleneck_proj
+            self.concat_projection = nn.Linear(512, 1024)    # For inference concatenation
+            
+            # Initialize these layers
+            self.inversion_projection.apply(weights_init_kaiming)
+            self.resnet_projection.apply(weights_init_kaiming)
+            self.patch_projection.apply(weights_init_kaiming)
+            self.final_projection.apply(weights_init_kaiming)
+            self.concat_projection.apply(weights_init_kaiming)
 
         for p in self.text_encoder.parameters():
             p.requires_grad_(False)
@@ -348,10 +364,11 @@ class PromptSGModel(nn.Module):
                 text_features = self._text_feat_cached.to(device=x.device).expand(x.shape[0], -1)
             else:
                 # For composed prompt, need to generate pseudo token first
-                # image_features_last, image_features, image_features_proj = self.image_encoder(x)
-                features_intermediate, features_final, features_proj= self.image_encoder(x)
-                v = features_proj[:, 0] if self.model_name == 'ViT-B-16' else features_proj[0]
-                # for RN50 v = self.inversion_projection(features_proj[0]) 
+                features_intermediate, features_final, features_proj = self.image_encoder(x)
+                if self.model_name == 'ViT-B-16':
+                    v = features_proj[:, 0]  # Already 512
+                else:  # RN50
+                    v = self.inversion_projection(features_proj[0])  # Project from 1024 to 512
                 s_star = self.inversion(v)
                 prompts, tokenized = self.prompt_composer(s_star)
                 # with torch.no_grad():
@@ -360,8 +377,7 @@ class PromptSGModel(nn.Module):
 
         # Get image features only
         if get_image:
-            # image_features_last, image_features, image_features_proj = self.image_encoder(x)
-            features_intermediate, features_final, features_proj= self.image_encoder(x)
+            features_intermediate, features_final, features_proj = self.image_encoder(x)
             if self.model_name == 'RN50':
                 return features_proj[0]
             elif self.model_name == 'ViT-B-16':
@@ -369,19 +385,14 @@ class PromptSGModel(nn.Module):
 
         # Main forward pass for training/inference
         # Get image features from CLIP visual encoder
-        
-        # image_features_last, image_features, image_features_proj = self.image_encoder(x)
         features_intermediate, features_final, features_proj = self.image_encoder(x)
 
         device = x.device
         B = x.size(0)
+        
         # Extract features based on backbone type
         if self.model_name == 'ViT-B-16':
             # ViT-B/16: [CLS] token + patch tokens
-            # img_feature_last = image_features_last[:, 0]  # Last layer CLS token (768)
-            # img_feature = image_features[:, 0]  # Intermediate CLS token (768)
-            # img_feature_proj = image_features_proj[:, 0]  # Projected CLS token (512)
-         
             CLS_intermediate = features_intermediate[:, 0]  # Intermediate CLS token (768)
             CLS_final = features_final[:, 0]  # Last layer CLS token (768)
             CLS_proj = features_proj[:, 0]  # Projected CLS token (512)
@@ -389,120 +400,78 @@ class PromptSGModel(nn.Module):
             # Patches for cross-attention (exclude CLS token)
             patches = features_proj[:, 1:]  # (batch, num_patches, 512)
             
+            # Visual tokens for interaction
+            visual_tokens = features_proj  # (B, 1+M, 512)
+            
+            # Get global visual embedding for inversion network
+            v = CLS_proj  # Already 512
+            
         elif self.model_name == 'RN50':
             # ResNet50: global feature + spatial features
-            # Đoạn này cần kiểm tra kỹ output của CLIP ResNet50
-            # Theo CLIP-ReID: image_features_proj[0] là global feature (1024)
-            #                image_features_proj[1] là spatial features (1024, h, w)
-            #                image_features_proj[2] là projected global feature (512)
-            #                image_features_proj[3] là projected spatial features (512, h, w)
-            # Theo CLIP-ReID: features_intermediate[0] là global feature (1024)
-            #                features_final[0] là spatial features (1024, h, w)
-            #                features_proj[0] là projected global feature (1024)
-            #                features_proj[1] là projected spatial features (512, h, w)
-            
-            # Global features
-            # img_feature_last = F.avg_pool2d(image_features_last, image_features_last.shape[2:]).view(x.shape[0], -1)  # (batch, 2048)
-            # img_feature = F.avg_pool2d(image_features, image_features.shape[2:]).view(x.shape[0], -1)  # (batch, 2048)
-            # img_feature_proj = image_features_proj[0]  # Global projected feature (1024)
             CLS_intermediate = F.avg_pool2d(features_intermediate, features_intermediate.shape[2:]).view(x.shape[0], -1)  # (batch, 2048)
             CLS_final = F.avg_pool2d(features_final, features_final.shape[2:]).view(x.shape[0], -1)  # (batch, 2048)
             CLS_proj = features_proj[0]  # Global projected feature (1024)
             
-            # Với ResNet50, chúng ta cần dùng projected spatial features (512) cho cross-attention
-            # image_features_proj[3] có shape (batch, 512, h, w)
-            # if len(image_features_proj) > 3:
-            #     b, c, h, w = image_features_proj[3].shape  # c = 512
-            #     patches = image_features_proj[3].view(b, c, -1).permute(0, 2, 1)  # (batch, h*w, 512)
-            # features_proj[1] có shape (batch, 512, h, w)
+            # Get global visual embedding for inversion network (project to 512)
+            v = self.inversion_projection(CLS_proj)  # (batch, 512)
+            
+            # Prepare patches for cross-attention
             if len(features_proj) > 1:
                 b, c, h, w = features_proj[1].shape  # c = 512
                 patches = features_proj[1].view(b, c, -1).permute(0, 2, 1)  # (batch, h*w, 512)
-                
-                # Tạo CLS token từ projected global feature (cần project từ 1024 xuống 512)
-                if not hasattr(self, 'resnet_projection'):
-                    self.resnet_projection = nn.Linear(1024, 512).to(x.device)
-                # cls_token = self.resnet_projection(img_feature_proj).unsqueeze(1)  # (batch, 1, 512)
                 cls_token = self.resnet_projection(CLS_proj).unsqueeze(1)  # (batch, 1, 512)
             else:
-                # Fallback: dùng spatial features và project
-                # b, c, h, w = image_features_proj[1].shape  # c = 1024
-                # patches = image_features_proj[1].view(b, c, -1).permute(0, 2, 1)  # (batch, h*w, 1024)
+                # Fallback: use spatial features and project
                 b, c, h, w = features_final.shape  # c = 1024
                 patches = features_final.view(b, c, -1).permute(0, 2, 1)  # (batch, h*w, 1024)
-                
-                # Project patches từ 1024 xuống 512
-                if not hasattr(self, 'patch_projection'):
-                    self.patch_projection = nn.Linear(1024, 512).to(x.device)
                 patches = self.patch_projection(patches)  # (batch, h*w, 512)
-                
-                # Tạo CLS token
-                if not hasattr(self, 'resnet_projection'):
-                    self.resnet_projection = nn.Linear(1024, 512).to(x.device)
-                # cls_token = self.resnet_projection(img_feature_proj).unsqueeze(1)  # (batch, 1, 512)
                 cls_token = self.resnet_projection(CLS_proj).unsqueeze(1)  # (batch, 1, 512)
-        
-        # Get global visual embedding for inversion network
-        # Dùng projected feature cho inversion (luôn là 512)
-        if self.model_name == 'ViT-B-16':
-            v = CLS_proj  # Đã là 512
-        elif self.model_name == 'RN50':
-            # Cần project từ 1024 xuống 512
-            if not hasattr(self, 'inversion_projection'):
-                self.inversion_projection = nn.Linear(1024, 512).to(x.device)
-            v = self.inversion_projection(CLS_proj)  # (batch, 512)
+            
+            # Visual tokens for interaction
+            visual_tokens = torch.cat([cls_token, patches], dim=1)  # (B, 1+M, 512)
 
         # Generate text features (always composed mode)
         s_star = self.inversion(v)  # Generate pseudo token (512)
         prompts, tokenized = self.prompt_composer(s_star)
         pooled, tokens, eot_idx = self.text_encoder(prompts, tokenized, return_tokens=True)
         text_feat = pooled
+        
+        # Prepare text tokens for interaction
         if self.coattn_text_mode == "full":
             text_tokens = tokens
         elif self.coattn_text_mode == "eot":
-            text_tokens = tokens[torch.arange(tokens.size(0), device=tokens.device), eot_idx].unsqueeze(1)  # (batch, 512)
-
+            text_tokens = tokens[torch.arange(tokens.size(0), device=tokens.device), eot_idx].unsqueeze(1)  # (batch, 1, D)
+        
         # ========== Multimodal Interaction Module ==========
-        if self.model_name == "ViT-B-16":
-            visual_tokens = features_proj  # (B, 1+M, 512)
-        else:
-            visual_tokens = torch.cat([cls_token, patches], dim=1)  # (B, 1+M, 512)
-        
-        # Đảm bảo text_tokens đúng shape
+        # Ensure text_tokens has correct shape
         if self.coattn_text_mode == "full" and text_tokens.dim() == 2:
-            text_tokens = text_tokens.unsqueeze(1)  # (B, 1, D) nếu là pooled feature
+            text_tokens = text_tokens.unsqueeze(1)  # (B, 1, D) if it's pooled feature
         
-        # Gọi interaction module
+        # Call interaction module
         v_tokens_out, attn_map, cls_states = self.interaction(
             visual_tokens=visual_tokens,
             text_tokens=text_tokens,
             return_cls_states=True
         )
         
-        # Lấy final representation từ CLS token
-        v_final = cls_states[-1]  # CLS token sau 2 transformer blocks
+        # Get final representation from CLS token
+        v_final = cls_states[-1]  # CLS token after 2 transformer blocks
         
         # ========== Triplet Loss States ==========
-        # Theo paper: dùng 3 hidden states cho triplet loss
-        # 1. CLS token gốc từ visual encoder (trước interaction)
-        # 2. CLS token sau cross-attention
-        # 3. CLS token sau transformer blocks
         triplet_feats = [
-            cls_states[0],  # Original CLS (sau cross-attention reweight)
-            cls_states[1],  # Sau block 1
-            cls_states[2]   # Sau block 2 (final)
+            cls_states[0],  # Original CLS (after cross-attention reweight)
+            cls_states[1],  # After block 1
+            cls_states[2]   # After block 2 (final)
         ]
         
-        # Với ResNet50, cần project v_final từ 512 lên 1024 cho bottleneck_proj
+        # Prepare features for bottleneck layers
         if self.model_name == 'RN50':
-            if not hasattr(self, 'final_projection'):
-                self.final_projection = nn.Linear(512, 1024).to(x.device)
-            feat_proj_input = self.final_projection(v_final)
+            feat_proj_input = self.final_projection(v_final)  # Project from 512 to 1024
         else:
-            feat_proj_input = v_final  # ViT: giữ nguyên 512
-            
+            feat_proj_input = v_final  # ViT: keep as 512
+        
         # ========== Bottleneck Layers ==========
-        feat = self.bottleneck(CLS_final) #CLS_final: CLS x12 - 768
+        feat = self.bottleneck(CLS_final)  # CLS_final: CLS x12 - 768
         feat_proj = self.bottleneck_proj(feat_proj_input)
 
         # ========== Output ==========
@@ -510,18 +479,14 @@ class PromptSGModel(nn.Module):
             cls_score = self.classifier(feat)
             cls_score_proj = self.classifier_proj(feat_proj)
             return [cls_score, cls_score_proj], triplet_feats, v, text_feat
-
         else:
             if self.neck_feat == 'after':
                 # Concatenate features after bottleneck
                 return torch.cat([feat, feat_proj], dim=1)
             else:
-                # Concatenate original image feature với v_final
-                # Với ResNet50, cần project v_final từ 512 lên 1024
+                # Concatenate original image feature with v_final
                 if self.model_name == 'RN50':
-                    if not hasattr(self, 'concat_projection'):
-                        self.concat_projection = nn.Linear(512, 1024).to(x.device)
-                    v_final_concat = self.concat_projection(v_final)
+                    v_final_concat = self.concat_projection(v_final)  # Project from 512 to 1024
                 else:
                     v_final_concat = v_final
                 return torch.cat([CLS_final, v_final_concat], dim=1)
