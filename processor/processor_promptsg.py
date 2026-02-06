@@ -140,76 +140,29 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
         model.train()
 
         for n_iter, (img, pid, camid, viewid) in enumerate(train_loader):
-            optimizer.zero_grad()
             img = img.to(device)
             target = pid.to(device)
-
+            
+            optimizer.zero_grad()
             with amp.autocast(enabled=True):
-                # cls_score, triplet_feats, image_feat, text_feat = model(img, target)
                 cls_score, triplet_feats, image_feat, text_feat = model(x = img, label = target)
-
-                # ============ DEBUG: Check model outputs ============
-                if epoch == 1 and n_iter == 0:
-                    logger.info("=== DEBUG: Model Outputs ===")
-                    if isinstance(cls_score, (list, tuple)):
-                        logger.info(f"Number of cls_scores: {len(cls_score)}")
-                        for i, score in enumerate(cls_score):
-                            logger.info(f"  cls_score[{i}] shape: {score.shape}")
-                    else:
-                        logger.info(f"cls_score shape: {cls_score.shape}")
-                    logger.info(f"triplet_feats type: {type(triplet_feats)}")
-                    if isinstance(triplet_feats, (list, tuple)):
-                        logger.info(f"Number of triplet features: {len(triplet_feats)}")
-                        for i, feat in enumerate(triplet_feats):
-                            logger.info(f"  triplet_feats[{i}] shape: {feat.shape}")
-                            logger.info(f"  triplet_feats[{i}] min/max: {feat.min().item():.4f}/{feat.max().item():.4f}")
-                    else:
-                        logger.info(f"triplet_feats shape: {triplet_feats.shape}")
-                    logger.info(f"image_feat shape: {image_feat.shape}")
-                    logger.info(f"text_feat shape: {text_feat.shape}")
-                    logger.info(f"target shape: {target.shape}")
-                    logger.info(f"Batch size: {img.shape[0]}")
-                    logger.info("===========================")
-                # ============ END DEBUG ============
-
                 total_loss, losses_dict = loss_fn(cls_score, triplet_feats, target, camid, image_feat, text_feat)
-                loss = total_loss
-                id_loss = losses_dict['id_loss']
-                tri_loss = losses_dict['tri_loss']
-                supcon_loss = losses_dict['supcon_loss']
-                
-                # ============ DEBUG: Check loss values ============
-                # if epoch == 1 and n_iter == 0:
-                #     logger.info("=== DEBUG: Loss Values ===")
-                #     logger.info(f"Total loss: {loss.item():.6f}")
-                #     logger.info(f"ID loss: {id_loss.item():.6f}")
-                #     logger.info(f"Triplet loss: {tri_loss.item():.6f}")
-                #     logger.info(f"SupCon loss: {supcon_loss.item():.6f}")
-                #     logger.info(f"Lambda SupCon: {cfg.MODEL.PROMPTSG.LAMBDA_SUPCON if hasattr(cfg.MODEL.PROMPTSG, 'LAMBDA_SUPCON') else 'N/A'}")
-                #     logger.info(f"Lambda Triplet: {cfg.MODEL.PROMPTSG.LAMBDA_TRIPLET if hasattr(cfg.MODEL.PROMPTSG, 'LAMBDA_TRIPLET') else 'N/A'}")
-                #     logger.info(f"Lambda ID: {cfg.MODEL.PROMPTSG.LAMBDA_ID if hasattr(cfg.MODEL.PROMPTSG, 'LAMBDA_ID') else 'N/A'}")
-                #     logger.info("==========================")
-                # ============ END DEBUG ============
-
-            scaler.scale(loss).backward()
-
-            # Gradient clipping for stability
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
+            
+            scaler.scale(total_loss).backward()
             scaler.step(optimizer)
             scaler.update()
 
+            # Detach losses for logging to avoid graph issues
             with torch.no_grad():
                 # cls_score is a list [cls_score, cls_score_proj], use first one for accuracy
                 main_cls_score = cls_score[0] if isinstance(cls_score, (list, tuple)) else cls_score
                 acc = (main_cls_score.max(1)[1] == target).float().mean()
-
-            loss_meter.update(loss.item(), img.shape[0])
-            id_meter.update(id_loss.item(), img.shape[0])
-            tri_meter.update(tri_loss.item(), img.shape[0])
-            supcon_meter.update(supcon_loss.item(), img.shape[0])
-            acc_meter.update(acc.item(), 1)
+                
+                loss_meter.update(total_loss.item(), img.shape[0])
+                id_meter.update(losses_dict['id_loss'].item(), img.shape[0])
+                tri_meter.update(losses_dict['tri_loss'].item(), img.shape[0])
+                supcon_meter.update(losses_dict['supcon_loss'].item(), img.shape[0])
+                acc_meter.update(acc.item(), 1)
 
             torch.cuda.synchronize()
             if (n_iter + 1) % log_period == 0:

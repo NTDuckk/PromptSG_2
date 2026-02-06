@@ -436,15 +436,15 @@ class PromptSGModel(nn.Module):
         pooled, tokens, eot_idx = self.text_encoder(prompts, tokenized, return_tokens=True)
         text_feat = pooled
         
-        # Prepare text tokens for interaction
+        # Prepare text tokens for interaction - DETACH to prevent graph reuse errors
         if self.coattn_text_mode == "full":
-            text_tokens = tokens
+            text_tokens = tokens.detach()
         elif self.coattn_text_mode == "eot":
-            text_tokens = tokens[torch.arange(tokens.size(0), device=tokens.device), eot_idx].unsqueeze(1)  # (batch, 1, D)
+            text_tokens = tokens[torch.arange(tokens.size(0), device=tokens.device), eot_idx].unsqueeze(1).detach()
         
         # ========== Multimodal Interaction Module ==========
         # Ensure text_tokens has correct shape
-        if self.coattn_text_mode == "full" and text_tokens.dim() == 2:
+        if text_tokens.dim() == 2:
             text_tokens = text_tokens.unsqueeze(1)  # (B, 1, D) if it's pooled feature
         
         # Call interaction module
