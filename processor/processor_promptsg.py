@@ -179,16 +179,16 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
                 supcon_loss = losses_dict['supcon_loss']
                 
                 # ============ DEBUG: Check loss values ============
-                if epoch == 1 and n_iter == 0:
-                    logger.info("=== DEBUG: Loss Values ===")
-                    logger.info(f"Total loss: {loss.item():.6f}")
-                    logger.info(f"ID loss: {id_loss.item():.6f}")
-                    logger.info(f"Triplet loss: {tri_loss.item():.6f}")
-                    logger.info(f"SupCon loss: {supcon_loss.item():.6f}")
-                    logger.info(f"Lambda SupCon: {cfg.MODEL.PROMPTSG.LAMBDA_SUPCON if hasattr(cfg.MODEL.PROMPTSG, 'LAMBDA_SUPCON') else 'N/A'}")
-                    logger.info(f"Lambda Triplet: {cfg.MODEL.PROMPTSG.LAMBDA_TRIPLET if hasattr(cfg.MODEL.PROMPTSG, 'LAMBDA_TRIPLET') else 'N/A'}")
-                    logger.info(f"Lambda ID: {cfg.MODEL.PROMPTSG.LAMBDA_ID if hasattr(cfg.MODEL.PROMPTSG, 'LAMBDA_ID') else 'N/A'}")
-                    logger.info("==========================")
+                # if epoch == 1 and n_iter == 0:
+                #     logger.info("=== DEBUG: Loss Values ===")
+                #     logger.info(f"Total loss: {loss.item():.6f}")
+                #     logger.info(f"ID loss: {id_loss.item():.6f}")
+                #     logger.info(f"Triplet loss: {tri_loss.item():.6f}")
+                #     logger.info(f"SupCon loss: {supcon_loss.item():.6f}")
+                #     logger.info(f"Lambda SupCon: {cfg.MODEL.PROMPTSG.LAMBDA_SUPCON if hasattr(cfg.MODEL.PROMPTSG, 'LAMBDA_SUPCON') else 'N/A'}")
+                #     logger.info(f"Lambda Triplet: {cfg.MODEL.PROMPTSG.LAMBDA_TRIPLET if hasattr(cfg.MODEL.PROMPTSG, 'LAMBDA_TRIPLET') else 'N/A'}")
+                #     logger.info(f"Lambda ID: {cfg.MODEL.PROMPTSG.LAMBDA_ID if hasattr(cfg.MODEL.PROMPTSG, 'LAMBDA_ID') else 'N/A'}")
+                #     logger.info("==========================")
                 # ============ END DEBUG ============
 
             scaler.scale(loss).backward()
