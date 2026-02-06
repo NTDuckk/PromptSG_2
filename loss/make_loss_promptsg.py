@@ -60,7 +60,7 @@ def make_loss(cfg, num_classes):
                     if (prompt_mode != "simplified") or enable_supcon_in_simplified:
                         # Use symmetric supervised contrastive loss (Equation 4-5)
                         SUPCON_LOSS = symmetric_supervised_contrastive_loss(
-                            image_feat, text_feat, target, temperature=cfg.MODEL.PROMPTSG.SUPCON_TEMPERATURE
+                            image_feat, text_feat, target, temperature=0.07
                         )
                         total_loss = total_loss + cfg.MODEL.PROMPTSG.LAMBDA_SUPCON * SUPCON_LOSS
                 
