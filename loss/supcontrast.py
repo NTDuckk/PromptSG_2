@@ -113,31 +113,27 @@ class SupConLoss(torch.nn.Module):
         return loss
 
 
-def symmetric_supervised_contrastive_loss(i2t_feat, t2i_feat, labels, temperature=0.07, device='cuda'):
+def symmetric_supervised_contrastive_loss(v_feat, l_feat, labels, temperature=0.07, device='cuda'):
     """
     Symmetric Supervised Contrastive Loss (Equation 4-5 in PromptSG paper)
     
     Args:
-        i2t_feat: (visual_feat, text_feat) for image-to-text
-        t2i_feat: (text_feat, visual_feat) for text-to-image  
+        v_feat: visual features (B, D)
+        l_feat: text features (B, D)
         labels: identity labels (B,)
         temperature: temperature parameter τ
         device: device string
     """
     device = torch.device(device)
     
-    # Unpack features
-    v_i2t, l_i2t = i2t_feat
-    v_t2i, l_t2i = t2i_feat
-    
     # Move to device
-    v_i2t = v_i2t.to(device)
-    l_i2t = l_i2t.to(device)
-    v_t2i = v_t2i.to(device)
-    l_t2i = l_t2i.to(device)
+    v_feat = v_feat.to(device)
+    l_feat = l_feat.to(device)
     labels = labels.to(device)
     
-    batch_size = v_i2t.size(0)
+    # For symmetric: i2t uses v_feat, l_feat; t2i uses l_feat, v_feat
+    v_i2t, l_i2t = v_feat, l_feat
+    v_t2i, l_t2i = l_feat, v_feat
     
     # Normalize features
     v_i2t_norm = F.normalize(v_i2t, dim=1)
