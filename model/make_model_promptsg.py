@@ -110,6 +110,7 @@ class FixedPromptComposer(nn.Module):
         
         fixed_ids = self.token_ids.clone()
         fixed_ids[0, self.x_pos] = clip_module.tokenize(["person"])[0, 1].item()  # Replace X with person token
+        fixed_ids = fixed_ids.to(self.token_embedding.weight.device)  # Move to same device as embedding
         self.fixed_embeddings = self.token_embedding(fixed_ids).type(self.dtype)
     
     def forward(self, s_star):
