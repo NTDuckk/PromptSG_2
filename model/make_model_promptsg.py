@@ -84,36 +84,50 @@ class FixedPromptComposer(nn.Module):
         super().__init__()
         self.token_embedding = clip_model.token_embedding
         self.dtype = clip_model.dtype
-        
-        # Template chính xác như paper
+
+        device = self.token_embedding.weight.device
+
+        # ---- Composed prompt (paper) ----
         template = "A photo of a X person"
-        tokenized = clip.tokenize(template).cuda()
-        
+        tokenized = clip.tokenize(template).to(device)  # (1, 77)
+        self.register_buffer("tokenized_prompts", tokenized)
+
         with torch.no_grad():
             embedding = self.token_embedding(tokenized).type(self.dtype)
-        
-        # Tìm vị trí của token "X" (place holder)
-        tokens = tokenized[0].cpu().numpy()
-        # CLIP tokenizer: "X" thường có id riêng
-        x_pos = torch.where(tokenized[0] == clip.tokenize("X")[0][1])[0].item()
-        
-        # Tách prefix (trước X) và suffix (sau X)
+
+        # Find position of "X" placeholder robustly (avoid CPU/CUDA mismatch)
+        x_token_id = int(clip.tokenize("X")[0, 1])  # python int
+        x_pos = torch.where(tokenized[0] == x_token_id)[0].item()
+
         self.register_buffer("token_prefix", embedding[:, :x_pos, :])
-        self.register_buffer("token_suffix", embedding[:, x_pos+1:, :])
+        self.register_buffer("token_suffix", embedding[:, x_pos + 1:, :])
         self.x_position = x_pos
-        
+
+        # ---- Simplified prompt cache (used by _ensure_text_features) ----
+        template_simpl = "A photo of a person"
+        tokenized_simpl = clip.tokenize(template_simpl).to(device)  # (1, 77)
+        self.register_buffer("tokenized_simplified", tokenized_simpl)
+        with torch.no_grad():
+            embed_simpl = self.token_embedding(tokenized_simpl).type(self.dtype)
+        self.register_buffer("embed_simplified", embed_simpl)
+
+    def _ensure_embeddings(self):
+        # Kept for compatibility with _ensure_text_features(); buffers already built in __init__
+        return
+
     def forward(self, s_star):
+        """
+        Returns:
+            prompts: (B, 77, C)  token embeddings with [S*] injected at X position
+            tokenized: (B, 77)   token ids (for EOT index)
+        """
         B = s_star.size(0)
         prefix = self.token_prefix.expand(B, -1, -1)
         suffix = self.token_suffix.expand(B, -1, -1)
-        
-        prompts = torch.cat([
-            prefix,
-            s_star.unsqueeze(1),  # [S*] token
-            suffix
-        ], dim=1)
-        
-        return prompts
+
+        prompts = torch.cat([prefix, s_star.unsqueeze(1), suffix], dim=1)
+        tokenized = self.tokenized_prompts.expand(B, -1)
+        return prompts, tokenized
 
 class LayerNorm(nn.LayerNorm):
     """LayerNorm that is safe to use with fp16 (casts to fp32 for normalization)."""
@@ -420,8 +434,9 @@ class PromptSGModel(nn.Module):
 
         # Generate text features (always composed mode)
         s_star = self.inversion(v)  # Generate pseudo token (512)
-        prompts = self.prompt_composer(s_star)
-        pooled, tokens, eot_idx = self.text_encoder(prompts, self.prompt_composer.tokenized_prompts, return_tokens=True)
+        prompts, tokenized_prompts = self.prompt_composer(s_star)
+        pooled, tokens, eot_idx = self.text_encoder(prompts, tokenized_prompts, return_tokens=True)
+
         text_feat = pooled
         
         # Prepare text tokens for interaction - DETACH to prevent graph reuse errors
