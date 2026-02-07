@@ -6,6 +6,7 @@ _tokenizer = _Tokenizer()
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 import torch.nn.functional as F
 
+from .clip import clip
 
 def weights_init_kaiming(m):
     classname = m.__class__.__name__
@@ -21,7 +22,6 @@ def weights_init_kaiming(m):
         if m.affine:
             nn.init.constant_(m.weight, 1.0)
             nn.init.constant_(m.bias, 0.0)
-
 
 def weights_init_classifier(m):
     classname = m.__class__.__name__
@@ -56,7 +56,6 @@ class TextEncoder(nn.Module):
         return pooled, tokens_proj, eot_idx
 
 
-
 class InversionNetwork(nn.Module):
     """
     f_theta: v (CLIP joint embedding dim) -> s* (token embedding width)
@@ -77,57 +76,47 @@ class InversionNetwork(nn.Module):
         x = self.bn(x)
         return x
 
-
 class FixedPromptComposer(nn.Module):
     def __init__(self, clip_model):
         super().__init__()
         self.token_embedding = clip_model.token_embedding
         self.dtype = clip_model.dtype
 
-        # Tokenize template parts
-        self.template = "A photo of a {} person"
-        self.prefix = "A photo of a"
-        self.suffix = "person"
-
-        # Tokenize từng phần
-        import model.clip.clip as clip_module
-        prefix_tokens = clip_module.tokenize([self.prefix])[0, 1:-1].tolist()  # exclude SOT and EOT
-        suffix_tokens = clip_module.tokenize([self.suffix])[0, 1:-1].tolist()
-
-        # CLIP special tokens
-        self.sot_token = clip_module.tokenize([""])[0, 0].item()
-        self.eot_token = clip_module.tokenize([""])[0, -1].item()
-
-        # Tạo token sequence: [SOT] + prefix + [X] + suffix + [EOT]
-        self.composed_str = self.template.format("X")
-        token_ids = clip_module.tokenize([self.composed_str])  # IMPORTANT: local var (avoid buffer name conflict)
-
-        # Find position of X in tokenized sequence
-        prefix_str = self.composed_str[:self.composed_str.find("X")]
-        prefix_ids = clip_module.tokenize([prefix_str])
-        self.x_pos = prefix_ids.shape[1] - 1  # Token position of X
-
-        fixed_ids = token_ids.clone()
-        fixed_ids[0, self.x_pos] = clip_module.tokenize(["person"])[0, 1].item()  # Replace X with person token
-        fixed_ids = fixed_ids.to(self.token_embedding.weight.device)  # Move to same device as embedding
-
-        # Build a fixed (no-grad) prompt embedding once, then store as buffers
+        # Follow PromptLearner style for tokenization
+        ctx_init = "A photo of a X person."
+        ctx_init = ctx_init.replace("_", " ")
+        n_ctx = 4  # number of tokens before X ("A photo of a")
+        
+        tokenized_prompts = clip.tokenize(ctx_init).cuda() 
         with torch.no_grad():
-            fixed_emb = self.token_embedding(fixed_ids).type(self.dtype)
+            embedding = self.token_embedding(tokenized_prompts).type(self.dtype) 
+        self.tokenized_prompts = tokenized_prompts  # torch.Tensor
 
-        fixed_emb = fixed_emb.detach()
-        self.register_buffer("fixed_embeddings", fixed_emb)
-        self.register_buffer("token_ids", token_ids)
+        # Split around X: prefix + X + suffix
+        # prefix: SOT + n_ctx tokens ("A photo of a"), suffix: after X ("person." + EOT)
+        self.register_buffer("token_prefix", embedding[:, :n_ctx + 1, :])  
+        self.register_buffer("token_suffix", embedding[:, n_ctx + 1 + 1:, :])  # after n_ctx+1 +1 (X position)  
 
     def forward(self, s_star):
+        """
+        s_star: (B, D) pseudo token, treated like learnable X
+        """
         B = s_star.size(0)
-        L = self.fixed_embeddings.size(1)
+        
+        prefix = self.token_prefix.expand(B, -1, -1) 
+        suffix = self.token_suffix.expand(B, -1, -1) 
+            
+        # Insert s* like cls_ctx: prefix + s* + suffix
+        prompts = torch.cat(
+            [
+                prefix,  # (B, n_ctx+1, D)
+                s_star.unsqueeze(1),  # (B, 1, D)
+                suffix,  # (B, *, D)
+            ],
+            dim=1,
+        ) 
 
-        prompts = self.fixed_embeddings.expand(B, L, -1).clone()
-        prompts[:, self.x_pos, :] = s_star
-
-        tokenized = self.token_ids.expand(B, -1)
-        return prompts, tokenized
+        return prompts
 
 class LayerNorm(nn.LayerNorm):
     """LayerNorm that is safe to use with fp16 (casts to fp32 for normalization)."""
@@ -434,8 +423,8 @@ class PromptSGModel(nn.Module):
 
         # Generate text features (always composed mode)
         s_star = self.inversion(v)  # Generate pseudo token (512)
-        prompts, tokenized = self.prompt_composer(s_star)
-        pooled, tokens, eot_idx = self.text_encoder(prompts, tokenized, return_tokens=True)
+        prompts = self.prompt_composer(s_star)
+        pooled, tokens, eot_idx = self.text_encoder(prompts, self.prompt_composer.tokenized_prompts, return_tokens=True)
         text_feat = pooled
         
         # Prepare text tokens for interaction - DETACH to prevent graph reuse errors
@@ -502,7 +491,7 @@ class PromptSGModel(nn.Module):
                 self.state_dict()[new_key].copy_(param_dict[key])
 
 
-from .clip import clip
+
 def load_clip_to_cpu(backbone_name, h_resolution, w_resolution, vision_stride_size):
     url = clip._MODELS[backbone_name]
     model_path = clip._download(url)
