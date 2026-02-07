@@ -39,7 +39,10 @@ class TextEncoder(nn.Module):
         self.ln_final = clip_model.ln_final
         self.text_projection = clip_model.text_projection
         self.dtype = clip_model.dtype
-
+        for p in self.parameters():
+            p.requires_grad_(False)
+        self.eval()
+    
     def forward(self, prompts, tokenized_prompts, return_tokens: bool = False):
         x = prompts + self.positional_embedding.type(self.dtype)
         x = x.permute(1, 0, 2)
@@ -81,41 +84,35 @@ class FixedPromptComposer(nn.Module):
         super().__init__()
         self.token_embedding = clip_model.token_embedding
         self.dtype = clip_model.dtype
-
-        # Follow PromptLearner style for tokenization
-        ctx_init = "A photo of a X person."
-        ctx_init = ctx_init.replace("_", " ")
-        n_ctx = 4  # number of tokens before X ("A photo of a")
         
-        tokenized_prompts = clip.tokenize(ctx_init).cuda() 
+        # Template chính xác như paper
+        template = "A photo of a X person"
+        tokenized = clip.tokenize(template).cuda()
+        
         with torch.no_grad():
-            embedding = self.token_embedding(tokenized_prompts).type(self.dtype) 
-        self.tokenized_prompts = tokenized_prompts  # torch.Tensor
-
-        # Split around X: prefix + X + suffix
-        # prefix: SOT + n_ctx tokens ("A photo of a"), suffix: after X ("person." + EOT)
-        self.register_buffer("token_prefix", embedding[:, :n_ctx + 1, :])  
-        self.register_buffer("token_suffix", embedding[:, n_ctx + 1 + 1:, :])  # after n_ctx+1 +1 (X position)  
-
-    def forward(self, s_star):
-        """
-        s_star: (B, D) pseudo token, treated like learnable X
-        """
-        B = s_star.size(0)
+            embedding = self.token_embedding(tokenized).type(self.dtype)
         
-        prefix = self.token_prefix.expand(B, -1, -1) 
-        suffix = self.token_suffix.expand(B, -1, -1) 
-            
-        # Insert s* like cls_ctx: prefix + s* + suffix
-        prompts = torch.cat(
-            [
-                prefix,  # (B, n_ctx+1, D)
-                s_star.unsqueeze(1),  # (B, 1, D)
-                suffix,  # (B, *, D)
-            ],
-            dim=1,
-        ) 
-
+        # Tìm vị trí của token "X" (place holder)
+        tokens = tokenized[0].cpu().numpy()
+        # CLIP tokenizer: "X" thường có id riêng
+        x_pos = torch.where(tokenized[0] == clip.tokenize("X")[0][1])[0].item()
+        
+        # Tách prefix (trước X) và suffix (sau X)
+        self.register_buffer("token_prefix", embedding[:, :x_pos, :])
+        self.register_buffer("token_suffix", embedding[:, x_pos+1:, :])
+        self.x_position = x_pos
+        
+    def forward(self, s_star):
+        B = s_star.size(0)
+        prefix = self.token_prefix.expand(B, -1, -1)
+        suffix = self.token_suffix.expand(B, -1, -1)
+        
+        prompts = torch.cat([
+            prefix,
+            s_star.unsqueeze(1),  # [S*] token
+            suffix
+        ], dim=1)
+        
         return prompts
 
 class LayerNorm(nn.LayerNorm):

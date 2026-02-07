@@ -113,52 +113,39 @@ class SupConLoss(torch.nn.Module):
         return loss
 
 
-def symmetric_supervised_contrastive_loss(v_feat, l_feat, labels, temperature=0.07, device='cuda'):
+def symmetric_supervised_contrastive_loss(v_feat, l_feat, labels, temperature=0.07):
     """
-    Symmetric Supervised Contrastive Loss (Equation 4-5 in PromptSG paper)
-    
-    Args:
-        v_feat: visual features (B, D)
-        l_feat: text features (B, D)
-        labels: identity labels (B,)
-        temperature: temperature parameter τ
-        device: device string
+    Đúng Equation 4-5 trong paper
     """
-    device = torch.device(device)
+    batch_size = v_feat.shape[0]
     
-    # Move to device
-    v_feat = v_feat.to(device)
-    l_feat = l_feat.to(device)
-    labels = labels.to(device)
+    # Normalize
+    v_feat = F.normalize(v_feat, dim=1)
+    l_feat = F.normalize(l_feat, dim=1)
     
-    # For symmetric: i2t uses v_feat, l_feat; t2i uses l_feat, v_feat
-    v_i2t, l_i2t = v_feat, l_feat
-    v_t2i, l_t2i = l_feat, v_feat
-    
-    # Normalize features
-    v_i2t_norm = F.normalize(v_i2t, dim=1)
-    l_i2t_norm = F.normalize(l_i2t, dim=1)
-    v_t2i_norm = F.normalize(v_t2i, dim=1)  
-    l_t2i_norm = F.normalize(l_t2i, dim=1)
-    
-    # Positive mask
+    # Positive mask: P(i) trong paper
     labels = labels.view(-1, 1)
     mask = torch.eq(labels, labels.T).float()
     
-    # Image-to-Text loss
-    sim_i2t = torch.matmul(v_i2t_norm, l_i2t_norm.T) / temperature
+    # Image-to-Text loss (Equation 5 đầu tiên)
+    sim_i2t = torch.matmul(v_feat, l_feat.T) / temperature
     logits_i2t = F.log_softmax(sim_i2t, dim=1)
+    
+    # Sum over positive samples như paper
     loss_i2t = - (mask * logits_i2t).sum(dim=1)
-    num_pos = mask.sum(dim=1).clamp(min=1.0)
-    loss_i2t = (loss_i2t / num_pos).mean()
+    num_pos_per_row = mask.sum(dim=1)
+    loss_i2t = loss_i2t / num_pos_per_row.clamp(min=1.0)
+    loss_i2t = loss_i2t.mean()
     
-    # Text-to-Image loss  
-    sim_t2i = torch.matmul(v_t2i_norm, l_t2i_norm.T) / temperature
+    # Text-to-Image loss (Equation 5 thứ hai)
+    sim_t2i = torch.matmul(l_feat, v_feat.T) / temperature
     logits_t2i = F.log_softmax(sim_t2i, dim=1)
-    loss_t2i = - (mask * logits_t2i).sum(dim=1)
-    loss_t2i = (loss_t2i / num_pos).mean()
     
-    # Symmetric loss
+    loss_t2i = - (mask * logits_t2i).sum(dim=1)
+    loss_t2i = loss_t2i / num_pos_per_row.clamp(min=1.0)
+    loss_t2i = loss_t2i.mean()
+    
+    # Symmetric loss (Equation 4)
     loss = (loss_i2t + loss_t2i)
     
     return loss
