@@ -58,7 +58,6 @@ class TextEncoder(nn.Module):
             return pooled
         return pooled, tokens_proj, eot_idx
 
-
 class InversionNetwork(nn.Module):
     """
     f_theta: v (CLIP joint embedding dim) -> s* (token embedding width)
@@ -78,8 +77,12 @@ class InversionNetwork(nn.Module):
         x = self.fc3(x)
         x = self.bn(x)
         return x
-
 class FixedPromptComposer(nn.Module):
+    """
+    Composed prompt: "A photo of a X person" với [S*] chèn vào vị trí X.
+    Trả về (prompts, tokenized_prompts) để TextEncoder lấy EOT đúng.
+    Đồng thời có cache simplified để _ensure_text_features() không vỡ.
+    """
     def __init__(self, clip_model):
         super().__init__()
         self.token_embedding = clip_model.token_embedding
@@ -87,45 +90,56 @@ class FixedPromptComposer(nn.Module):
 
         device = self.token_embedding.weight.device
 
-        # ---- Composed prompt (paper) ----
+        # ===== Composed =====
         template = "A photo of a X person"
         tokenized = clip.tokenize(template).to(device)  # (1, 77)
         self.register_buffer("tokenized_prompts", tokenized)
 
         with torch.no_grad():
-            embedding = self.token_embedding(tokenized).type(self.dtype)
+            embedding = self.token_embedding(tokenized).type(self.dtype)  # (1,77,C)
 
-        # Find position of "X" placeholder robustly (avoid CPU/CUDA mismatch)
-        x_token_id = int(clip.tokenize("X")[0, 1])  # python int
-        x_pos = torch.where(tokenized[0] == x_token_id)[0].item()
+        # Robust find placeholder X (try " X" then "X")
+        x_pos = None
+        cand_ids = [
+            int(clip.tokenize(" X")[0, 1].item()),
+            int(clip.tokenize("X")[0, 1].item()),
+        ]
+        for xid in cand_ids:
+            pos = (tokenized[0] == xid).nonzero(as_tuple=False)
+            if pos.numel() > 0:
+                x_pos = int(pos[0].item())
+                break
+        if x_pos is None:
+            raise RuntimeError("Cannot find placeholder token 'X' in tokenized template.")
 
-        self.register_buffer("token_prefix", embedding[:, :x_pos, :])
-        self.register_buffer("token_suffix", embedding[:, x_pos + 1:, :])
+        self.register_buffer("token_prefix", embedding[:, :x_pos, :])       # (1, x_pos, C)
+        self.register_buffer("token_suffix", embedding[:, x_pos + 1:, :])   # (1, 77-x_pos-1, C)
         self.x_position = x_pos
 
-        # ---- Simplified prompt cache (used by _ensure_text_features) ----
-        template_simpl = "A photo of a person"
-        tokenized_simpl = clip.tokenize(template_simpl).to(device)  # (1, 77)
-        self.register_buffer("tokenized_simplified", tokenized_simpl)
+        # ===== Simplified cache (để _ensure_text_features() chạy được) =====
+        template_s = "A photo of a person"
+        tokenized_s = clip.tokenize(template_s).to(device)  # (1,77)
+        self.register_buffer("tokenized_simplified", tokenized_s)
         with torch.no_grad():
-            embed_simpl = self.token_embedding(tokenized_simpl).type(self.dtype)
-        self.register_buffer("embed_simplified", embed_simpl)
+            embed_s = self.token_embedding(tokenized_s).type(self.dtype)
+        self.register_buffer("embed_simplified", embed_s)
 
     def _ensure_embeddings(self):
-        # Kept for compatibility with _ensure_text_features(); buffers already built in __init__
+        # compatibility: buffers đã tạo sẵn trong __init__
         return
 
     def forward(self, s_star):
         """
-        Returns:
-            prompts: (B, 77, C)  token embeddings with [S*] injected at X position
-            tokenized: (B, 77)   token ids (for EOT index)
+        s_star: (B, C)
+        returns:
+          prompts: (B, 77, C)
+          tokenized: (B, 77)
         """
         B = s_star.size(0)
         prefix = self.token_prefix.expand(B, -1, -1)
         suffix = self.token_suffix.expand(B, -1, -1)
-
         prompts = torch.cat([prefix, s_star.unsqueeze(1), suffix], dim=1)
+
         tokenized = self.tokenized_prompts.expand(B, -1)
         return prompts, tokenized
 
@@ -140,19 +154,28 @@ class LayerNorm(nn.LayerNorm):
 class QuickGELU(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(1.702 * x)
-
 class PromptSGInteraction(nn.Module):
-    def __init__(self, embed_dim=512, num_heads=8, mlp_ratio=4.0, attn_drop=0.0, 
-                 drop_path=0.0, reweight="mul_mean1", eps=1e-6):
+    """
+    Cross-modal attention (CẢI TIẾN theo style bạn đưa):
+      - Query  = visual tokens (CLS + patches)
+      - Key/Value = text tokens (full hoặc eot)
+      - Fuse: visual = gamma * Attn(visual<-text) + visual
+    Giữ REWEIGHT_MODE của PromptSG (mul_mean1/mul/residual).
+    """
+    def __init__(self, embed_dim=512, num_heads=8, mlp_ratio=4.0, attn_drop=0.0,
+                 drop_path=0.0, reweight="mul_mean1", eps=1e-6, post_blocks: int = 2):
         super().__init__()
         self.reweight = reweight
         self.eps = eps
-        
-        # Cross-attention: text query -> visual patches (Equation 7)
+
+        # Cross-attention: visual query -> text key/value
         self.cross_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=attn_drop, batch_first=True)
         self.cross_norm = LayerNorm(embed_dim)
-        
-        # 2 transformer blocks (self-attention on visual tokens)
+
+        # gamma residual (giống code bạn đưa)
+        self.gamma = nn.Parameter(torch.zeros(1))
+
+        # Post cross-attn transformer blocks (self-attn on visual tokens)
         self.blocks = nn.ModuleList([
             nn.ModuleDict({
                 'norm1': LayerNorm(embed_dim),
@@ -167,81 +190,76 @@ class PromptSGInteraction(nn.Module):
                 ),
                 'drop_path': DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
             })
-            for _ in range(2)
+            for _ in range(int(post_blocks))
         ])
 
-    def _reweight_patches(self, patches, attn_map):
-        """Apply attention map to reweight patches (Equation 7 implementation)"""
-        B, M, D = patches.shape
-        
+    def _reweight_tokens(self, tokens, attn_map):
+        """
+        tokens: (B, N, D)  (N = 1 + M)
+        attn_map: (B, 1, N)
+        """
+        B, N, D = tokens.shape
+
         if self.reweight == "mul_mean1":
-            scale = attn_map * M  # Scale to maintain magnitude
-            patches_reweighted = patches * scale.transpose(1, 2)
+            scale = attn_map * N  # maintain magnitude
+            out = tokens * scale.transpose(1, 2)
         elif self.reweight == "mul":
-            patches_reweighted = patches * attn_map.transpose(1, 2)
+            out = tokens * attn_map.transpose(1, 2)
         elif self.reweight == "residual":
-            patches_reweighted = patches * (1.0 + attn_map.transpose(1, 2) * M)
+            out = tokens * (1.0 + attn_map.transpose(1, 2) * N)
         else:
             raise ValueError(f"Unknown reweight mode: {self.reweight}")
-            
-        return patches_reweighted
+
+        return out
 
     def forward(self, visual_tokens, text_tokens, return_cls_states=False):
         """
-        visual_tokens: [CLS] + patches (B, 1+M, D)
-        text_tokens: text embedding (could be EOT or full sequence)
+        visual_tokens: (B, 1+M, D)  [CLS] + patches
+        text_tokens:   (B, L_text, D)  full or eot
         """
-        B, L, D = visual_tokens.shape
-        
-        # Separate CLS token and patches
-        cls_token = visual_tokens[:, :1, :]  # (B, 1, D)
-        patches = visual_tokens[:, 1:, :]    # (B, M, D)
-        
-        # Cross-attention: text attends to patches
-        # text_tokens as query, patches as key/value
+        B, N, D = visual_tokens.shape
+
+        # Cross-attn: visual attends to text
         attn_out, attn_weights = self.cross_attn(
-            text_tokens, patches, patches,
+            visual_tokens, text_tokens, text_tokens,
             need_weights=True, average_attn_weights=False
         )
-        
-        # Compute attention map (average over heads and text tokens)
-        # attn_weights: (B, num_heads, L_text, M_patches)
-        attn_map = attn_weights.mean(dim=1)  # (B, L_text, M)
-        if attn_map.size(1) > 1:  # If multiple text tokens, average them
-            attn_map = attn_map.mean(dim=1, keepdim=True)  # (B, 1, M)
-        
-        # Normalize attention map
+        # Fuse like your module: out = gamma*out + x
+        visual_fused = visual_tokens + self.gamma * attn_out
+
+        # attn_weights: (B, heads, N, L_text) -> attn_map per visual token (B,1,N)
+        attn_map = attn_weights.mean(dim=1)          # (B, N, L_text)
+        attn_map = attn_map.mean(dim=-1)             # (B, N)
         attn_map = attn_map / (attn_map.sum(dim=-1, keepdim=True) + self.eps)
-        
-        # Reweight patches using attention map
-        patches_reweighted = self._reweight_patches(patches, attn_map)
-        
-        # Recombine with CLS token
-        visual = torch.cat([cls_token, patches_reweighted], dim=1)
-        visual = self.cross_norm(visual)
-        
-        # Store CLS states for triplet loss
+        attn_map = attn_map.unsqueeze(1)             # (B, 1, N)
+
+        # Reweight (giữ PromptSG config)
+        visual_reweighted = self._reweight_tokens(visual_fused, attn_map)
+
+        # Norm
+        visual = self.cross_norm(visual_reweighted)
+
+        # CLS states for triplet
         cls_states = [visual[:, 0, :]]
-        
-        # 2 transformer blocks (self-attention only on visual)
+
+        # Post blocks
         for block in self.blocks:
-            # Self-attention
             residual = visual
             x = block['norm1'](visual)
             x, _ = block['attn'](x, x, x, need_weights=False)
             visual = residual + block['drop_path'](x)
-            
-            # MLP
+
             residual = visual
             x = block['norm2'](visual)
             x = block['mlp'](x)
             visual = residual + block['drop_path'](x)
-            
+
             cls_states.append(visual[:, 0, :])
-        
+
         if return_cls_states:
             return visual, attn_map, cls_states
         return visual, attn_map
+
 
 
 class PromptSGModel(nn.Module):
@@ -302,7 +320,9 @@ class PromptSGModel(nn.Module):
             attn_drop=getattr(cfg.MODEL.PROMPTSG, "ATTN_DROPOUT", 0.0),
             drop_path=getattr(cfg.MODEL.PROMPTSG, "DROP_PATH", 0.0),
             reweight=getattr(cfg.MODEL.PROMPTSG, "REWEIGHT_MODE", "mul_mean1"),
+            post_blocks=getattr(cfg.MODEL.PROMPTSG, "POST_CA_BLOCKS", 2),
         )
+
         
         # Loại bỏ các mode không cần thiết
         # Giữ lại coattn_text_mode để chọn dùng EOT hay full sequence
@@ -433,11 +453,11 @@ class PromptSGModel(nn.Module):
             visual_tokens = torch.cat([cls_token, patches], dim=1)  # (B, 1+M, 512)
 
         # Generate text features (always composed mode)
-        s_star = self.inversion(v)  # Generate pseudo token (512)
-        prompts, tokenized_prompts = self.prompt_composer(s_star)
-        pooled, tokens, eot_idx = self.text_encoder(prompts, tokenized_prompts, return_tokens=True)
-
+        s_star = self.inversion(v)  # (B,512)
+        prompts, tokenized = self.prompt_composer(s_star)
+        pooled, tokens, eot_idx = self.text_encoder(prompts, tokenized, return_tokens=True)
         text_feat = pooled
+
         
         # Prepare text tokens for interaction - DETACH to prevent graph reuse errors
         if self.coattn_text_mode == "full":
@@ -461,11 +481,7 @@ class PromptSGModel(nn.Module):
         v_final = cls_states[-1]  # CLS token after 2 transformer blocks
         
         # ========== Triplet Loss States ==========
-        triplet_feats = [
-            cls_states[0],  # Original CLS (after cross-attention reweight)
-            cls_states[1],  # After block 1
-            cls_states[2]   # After block 2 (final)
-        ]
+        triplet_feats = cls_states
         
         # Prepare features for bottleneck layers
         if self.model_name == 'RN50':
