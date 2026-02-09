@@ -14,7 +14,7 @@ MODEL:
     COATTN_LAYERS: 2             # số layer co-attn (paper 2 thường >2, PromptSG default 2)
     REWEIGHT_MODE: "mul_mean1"   # giữ giống PromptSG
     ENABLE_SUPCON_IN_SIMPLIFIED: false  # PromptSG paper: inference simplified, train composed
-
+  
 INPUT:
   SIZE_TRAIN: [256, 128]
   SIZE_TEST: [256, 128]
