@@ -70,7 +70,7 @@ _C.MODEL.PROMPTSG.POST_CA_BLOCKS = 2
 _C.MODEL.PROMPTSG.COATTN_TEXT_MODE = 'full'
 _C.MODEL.PROMPTSG.COATTN_LAYERS = 2
 _C.MODEL.PROMPTSG.REWEIGHT_MODE = "mul_mean1"
-_C.MODEL.PROMPTSG.ATTN_POOL_MODE = "mean"
+_C.MODEL.PROMPTSG.ATTN_POOL_MODE = "max"
 _C.MODEL.PROMPTSG.ENABLE_SUPCON_IN_SIMPLIFIED = False
 _C.MODEL.PROMPTSG.ATTN_MAP_MODE = "mean_head_mean_text_norm"
 # -----------------------------------------------------------------------------

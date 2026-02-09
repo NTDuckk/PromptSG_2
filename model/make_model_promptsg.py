@@ -307,7 +307,7 @@ class MultimodalInteractionModule(nn.Module):
         reweight: str = "mul_mean1",               # "mul_mean1" | "mul" | "residual"
         text_query_mode: str = "eot",              # "full" | "eot"
         attn_map_mode: str = "mean_head_mean_text_norm",  # "mean_head_mean_text_norm" | "mean_head"
-        attn_pool_mode: str = "mean",              # "mean" | "max" - pooling over heads
+        attn_pool_mode: str = "max",              # "mean" | "max" - pooling over heads
         eps: float = 1e-6,
         act_layer=QuickGELU,
     ):
