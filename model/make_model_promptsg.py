@@ -713,8 +713,7 @@ class PromptSGModel(nn.Module):
         else:
             s_star = self.inversion(v)
             prompts, tokenized = self.prompt_composer(s_star)
-            with torch.no_grad():
-                text_feat, text_tokens_full, eot_idx = self.text_encoder(prompts, tokenized, return_tokens=True)
+            text_feat, text_tokens_full, eot_idx = self.text_encoder(prompts, tokenized, return_tokens=True)
 
         # MIM
         sequence, attn_map, cls_states = self.mim(

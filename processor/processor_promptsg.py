@@ -149,6 +149,13 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
                 total_loss, losses_dict = loss_fn(cls_score, triplet_feats, target, camid, image_feat, text_feat)
             
             scaler.scale(total_loss).backward()
+
+            # Log gradient norms for key components
+            inv_grad_norm = sum(p.grad.norm().item()**2 for p in model.inversion.parameters() if p.grad is not None)**0.5 if hasattr(model, 'inversion') else 0.0
+            mim_grad_norm = sum(p.grad.norm().item()**2 for p in model.mim.parameters() if p.grad is not None)**0.5 if hasattr(model, 'mim') else 0.0
+            vis_grad_norm = sum(p.grad.norm().item()**2 for p in model.image_encoder.parameters() if p.grad is not None)**0.5 if hasattr(model, 'image_encoder') else 0.0
+            text_grad_norm = sum(p.grad.norm().item()**2 for p in model.text_encoder.parameters() if p.grad is not None)**0.5 if hasattr(model, 'text_encoder') else 0.0
+
             scaler.step(optimizer)
             scaler.update()
 
@@ -166,11 +173,12 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
 
             torch.cuda.synchronize()
             if (n_iter + 1) % log_period == 0:
-                log_msg = ("Epoch[{}] Iteration[{}/{}] Loss: {:.3f} (ID {:.3f} TRI {:.3f} SupCon {:.3f}) Acc: {:.3f} Lr: {:.2e}".format(
+                log_msg = ("Epoch[{}] Iteration[{}/{}] Loss: {:.3f} (ID {:.3f} TRI {:.3f} SupCon {:.3f}) Acc: {:.3f} Lr: {:.2e} Grad: Inv {:.4f} MIM {:.4f} Vis {:.4f} Text {:.4f}".format(
                     epoch, n_iter + 1, len(train_loader),
                     loss_meter.avg, id_meter.avg, tri_meter.avg, supcon_meter.avg,
                     acc_meter.avg,
-                    scheduler.get_lr()[0] if hasattr(scheduler, 'get_lr') else optimizer.param_groups[0]['lr']
+                    scheduler.get_lr()[0] if hasattr(scheduler, 'get_lr') else optimizer.param_groups[0]['lr'],
+                    inv_grad_norm, mim_grad_norm, vis_grad_norm, text_grad_norm
                 ))
                 logger.info(log_msg)
                 metrics_logger.info(log_msg)
