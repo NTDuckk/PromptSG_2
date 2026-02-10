@@ -306,6 +306,8 @@ class MultimodalInteractionModule(nn.Module):
         drop_path: float = 0.0,
         reweight: str = "mul_mean1",               # "mul_mean1" | "mul" | "residual"
         text_query_mode: str = "eot",              # "full" | "eot"
+        kv_mode: str = "patch",                  # "patch" | "cls_patch"
+        post_seq_mode: str = "image",             # "image" | "text_image" | "cls_patch" | "cls_text" | "cls_patch_text"
         attn_map_mode: str = "mean_head_mean_text_norm",  # "mean_head_mean_text_norm" | "mean_head"
         attn_pool_mode: str = "max",              # "mean" | "max" - pooling over heads
         eps: float = 1e-6,
@@ -314,6 +316,8 @@ class MultimodalInteractionModule(nn.Module):
         super().__init__()
         self.reweight = reweight
         self.text_query_mode = text_query_mode
+        self.kv_mode = kv_mode
+        self.post_seq_mode = post_seq_mode
         self.attn_map_mode = attn_map_mode
         self.attn_pool_mode = attn_pool_mode
         self.eps = eps
@@ -397,31 +401,74 @@ class MultimodalInteractionModule(nn.Module):
 
         # LN
         text_tokens_full = self.q_ln(text_tokens_full)
-        kv = self.kv_ln(patch_tokens)
 
         # query selection (full/eot)
         q = self._build_query(text_tokens_full, eot_idx=eot_idx)  # (B, Nq, D)
 
-        # explicit cross-attn -> attn weights after softmax
-        _, attn_w = self.cross_attn(q, kv, kv, need_weights=True)  # (B,H,Nq,M)
+        # KV selection: patches only OR (CLS + patches)
+        if self.kv_mode == "patch":
+            kv_tokens = patch_tokens                                   # (B, M, D)
+        elif self.kv_mode == "cls_patch":
+            kv_tokens = torch.cat([cls_token, patch_tokens], dim=1)    # (B, 1+M, D)
+        else:
+            raise ValueError(f"Unknown kv_mode: {self.kv_mode}")
 
-        # attn_map modes
-        attn_map = self._make_attn_map(attn_w, eot_idx=eot_idx)  # (B,1,M)
+        kv = self.kv_ln(kv_tokens)
+
+        # explicit cross-attn -> attn weights after softmax
+        attn_out, attn_w = self.cross_attn(q, kv, kv, need_weights=True)      # attn_out: (B,Nq,D), attn_w: (B,H,Nq,Nkv)
+
+        # attn_map modes (B,1,Nkv)
+        attn_map = self._make_attn_map(attn_w, eot_idx=eot_idx)
+
+        # slice patch-only attention map for reweight/visualization compatibility
+        if self.kv_mode == "cls_patch":
+            patch_attn_map = attn_map[:, :, 1:]                        # (B,1,M)
+            # if we normalized over (1+M), re-normalize over patches only
+            if self.attn_map_mode == "mean_head_mean_text_norm":
+                patch_attn_map = patch_attn_map / (patch_attn_map.sum(dim=-1, keepdim=True) + self.eps)
+        else:
+            patch_attn_map = attn_map                                  # (B,1,M)
 
         # reweight local patches
-        patch_rw = self._reweight_patches(patch_tokens, attn_map)  # (B,M,D)
+        patch_rw = self._reweight_patches(patch_tokens, patch_attn_map)  # (B,M,D)
 
-        # seq for post blocks
-        seq = torch.cat([cls_token, patch_rw], dim=1)  # (B,1+M,D)
+        # build refined query tokens from cross-attn output (optional but enabled for modes that include text)
+        q_ref = q + attn_out
+        #q_ref = attn_out
 
-        cls_states = [seq[:, 0, :]]
+        # seq for post blocks (self-attn + FFN) - supports multiple composition modes
+        # Backward compatible:
+        #   - "image"       : [CLS, patches]                (old behavior)
+        #   - "text_image"  : [text(ref), CLS, patches]     (like old but uses refined text)
+        # New:
+        #   - "cls_patch"       : [CLS, patches]
+        #   - "cls_text"        : [CLS, text(ref)]
+        #   - "cls_patch_text"  : [CLS, patches, text(ref)]
+        if self.post_seq_mode in ("image", "cls_patch"):
+            seq = torch.cat([cls_token, patch_rw], dim=1)              # (B,1+M,D)
+            cls_index = 0
+        elif self.post_seq_mode == "cls_text":
+            seq = torch.cat([cls_token, q_ref], dim=1)                 # (B,1+Nq,D)
+            cls_index = 0
+        elif self.post_seq_mode == "cls_patch_text":
+            seq = torch.cat([cls_token, patch_rw, q_ref], dim=1)        # (B,1+M+Nq,D)
+            cls_index = 0
+        elif self.post_seq_mode in ("text_image", "text_cls_patch"):
+            seq = torch.cat([q_ref, cls_token, patch_rw], dim=1)        # (B,Nq+1+M,D)
+            cls_index = q_ref.size(1)
+        else:
+            raise ValueError(f"Unknown post_seq_mode: {self.post_seq_mode}")
+
+        cls_states = [seq[:, cls_index, :]]
         for blk in self.post_blocks:
             seq = blk(seq)
-            cls_states.append(seq[:, 0, :])
+            cls_states.append(seq[:, cls_index, :])
 
         if return_cls_states:
-            return seq, attn_map, cls_states
-        return seq, attn_map
+            return seq, patch_attn_map, cls_states
+        return seq, patch_attn_map
+
 
 
 class PromptSGModel(nn.Module):
@@ -440,6 +487,8 @@ class PromptSGModel(nn.Module):
         self.coattn_text_mode = getattr(cfg.MODEL.PROMPTSG, "COATTN_TEXT_MODE", "full")  # "full"|"eot"
         self.attn_map_mode = getattr(cfg.MODEL.PROMPTSG, "ATTN_MAP_MODE", "mean_head_mean_text_norm")
         self.reweight_mode = getattr(cfg.MODEL.PROMPTSG, "REWEIGHT_MODE", "mul_mean1")
+        self.kv_mode = getattr(cfg.MODEL.PROMPTSG, "KV_MODE", "patch")  # "patch"|"cls_patch"
+        self.post_seq_mode = getattr(cfg.MODEL.PROMPTSG, "POST_SEQ_MODE", "image")  # "image"|"text_image"|"cls_patch"|"cls_text"|"cls_patch_text"
 
         # KHÔNG THAY ĐỔI - Giữ nguyên như CLIP-ReID
         if self.model_name == 'ViT-B-16':
@@ -506,6 +555,8 @@ class PromptSGModel(nn.Module):
             attn_map_mode=self.attn_map_mode,
             attn_pool_mode=getattr(cfg.MODEL.PROMPTSG, "ATTN_POOL_MODE", "mean"),
             eps=getattr(cfg.MODEL.PROMPTSG, "ATTN_EPS", 1e-6),
+            kv_mode=self.kv_mode,
+            post_seq_mode=self.post_seq_mode,
             act_layer=QuickGELU,
         )
 

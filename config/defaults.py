@@ -73,6 +73,8 @@ _C.MODEL.PROMPTSG.REWEIGHT_MODE = "mul_mean1"
 _C.MODEL.PROMPTSG.ATTN_POOL_MODE = "max"
 _C.MODEL.PROMPTSG.ENABLE_SUPCON_IN_SIMPLIFIED = False
 _C.MODEL.PROMPTSG.ATTN_MAP_MODE = "mean_head_mean_text_norm"
+_C.MODEL.PROMPTSG.KV_MODE = "patch"              # "patch" | "cls_patch"
+_C.MODEL.PROMPTSG.POST_SEQ_MODE = "cls_patch" # "cls_patch" | "cls_text" | "cls_patch_text"
 # -----------------------------------------------------------------------------
 # INPUT
 # -----------------------------------------------------------------------------
