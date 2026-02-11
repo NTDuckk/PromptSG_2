@@ -309,7 +309,7 @@ class MultimodalInteractionModule(nn.Module):
         kv_mode: str = "patch",                  # "patch" | "cls_patch"
         post_seq_mode: str = "image",             # "image" | "text_image" | "cls_patch" | "cls_text" | "cls_patch_text"
         attn_map_mode: str = "mean_head_mean_text_norm",  # "mean_head_mean_text_norm" | "mean_head"
-        attn_pool_mode: str = "max",              # "mean" | "max" - pooling over heads
+        attn_pool_mode: str = "mean",              # "mean" | "max" - pooling over heads
         eps: float = 1e-6,
         act_layer=QuickGELU,
     ):
@@ -434,7 +434,7 @@ class MultimodalInteractionModule(nn.Module):
         patch_rw = self._reweight_patches(patch_tokens, patch_attn_map)  # (B,M,D)
 
         # build refined query tokens from cross-attn output (optional but enabled for modes that include text)
-        q_ref = q + attn_out
+        q_ref = attn_out
         #q_ref = attn_out
 
         # seq for post blocks (self-attn + FFN) - supports multiple composition modes

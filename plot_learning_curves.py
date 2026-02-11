@@ -11,9 +11,13 @@ def parse_log_file(log_file):
     data = {
         'epochs': [],
         'mAP': [],
+        'mAP_epochs': [],
         'rank1': [],
+        'rank1_epochs': [],
         'rank5': [],
+        'rank5_epochs': [],
         'rank10': [],
+        'rank10_epochs': [],
         'total_loss': [],
         'id_loss': [],
         'triplet_loss': [],
@@ -64,18 +68,22 @@ def parse_log_file(log_file):
                     map_match = re.search(r'mAP: ([\d.]+)%', next_line)
                     if map_match:
                         data['mAP'].append(float(map_match.group(1)))
+                        data['mAP_epochs'].append(current_epoch)
                 elif 'Rank-1' in next_line:
                     rank1_match = re.search(r'Rank-1:{([\d.]+)%}', next_line)
                     if rank1_match:
                         data['rank1'].append(float(rank1_match.group(1)))
+                        data['rank1_epochs'].append(current_epoch)
                 elif 'Rank-5' in next_line:
                     rank5_match = re.search(r'Rank-5:{([\d.]+)%}', next_line)
                     if rank5_match:
                         data['rank5'].append(float(rank5_match.group(1)))
+                        data['rank5_epochs'].append(current_epoch)
                 elif 'Rank-10' in next_line:
                     rank10_match = re.search(r'Rank-10:{([\d.]+)%}', next_line)
                     if rank10_match:
-                        data['rank10'].append(float(rank10_match.group(10)))
+                        data['rank10'].append(float(rank10_match.group(1)))
+                        data['rank10_epochs'].append(current_epoch)
     
     return data
 
@@ -97,8 +105,9 @@ def plot_learning_curves(data, save_dir='plots'):
         
         for idx, (metric, title) in enumerate(zip(metrics, titles)):
             ax = axes[idx//2, idx%2]
-            if data[metric]:
-                ax.plot(data['epochs'], data[metric], 
+            epochs_key = f'{metric}_epochs'
+            if data[metric] and data[epochs_key]:
+                ax.plot(data[epochs_key], data[metric], 
                        color=colors[idx], linewidth=2, marker='o', markersize=4)
                 ax.set_xlabel('Epoch')
                 ax.set_ylabel(title)
@@ -108,7 +117,7 @@ def plot_learning_curves(data, save_dir='plots'):
                 # Add best value annotation
                 best_idx = np.argmax(data[metric])
                 best_val = data[metric][best_idx]
-                best_epoch = data['epochs'][best_idx]
+                best_epoch = data[epochs_key][best_idx]
                 ax.annotate(f'Best: {best_val:.1f}% (Epoch {best_epoch})',
                            xy=(best_epoch, best_val), 
                            xytext=(10, 10), textcoords='offset points',
@@ -165,8 +174,8 @@ def plot_learning_curves(data, save_dir='plots'):
         # Left: Validation metrics
         ax1_twin = ax1.twinx()
         
-        line1 = ax1.plot(data['epochs'], data['mAP'], 'b-', linewidth=2, marker='o', markersize=4, label='mAP')
-        line2 = ax1.plot(data['epochs'], data['rank1'], 'r-', linewidth=2, marker='s', markersize=4, label='Rank-1')
+        line1 = ax1.plot(data['mAP_epochs'], data['mAP'], 'b-', linewidth=2, marker='o', markersize=4, label='mAP')
+        line2 = ax1.plot(data['rank1_epochs'], data['rank1'], 'r-', linewidth=2, marker='s', markersize=4, label='Rank-1')
         line3 = ax1_twin.plot(data['epochs'][:len(data['total_loss'])], data['total_loss'], 
                              'g--', linewidth=2, marker='^', markersize=4, label='Total Loss')
         
@@ -294,6 +303,100 @@ def print_training_log(data):
         print(f"Best Rank-1: {best_rank1:.2f}% at Epoch {best_rank1_epoch}")
     
     print("="*80 + "\n")
+
+def display_attention_visualization(image, attention_map, patch_size=16, image_size=224, alpha=0.6, cmap='viridis'):
+    """
+    Hiển thị 3 hình: ảnh gốc, attention map thuần túy, attention map overlay lên ảnh gốc
+    
+    Args:
+        image: torch tensor (C, H, W) hoặc numpy array
+        attention_map: torch tensor (num_patches,) - attention weights
+        patch_size: kích thước patch (16 cho ViT-B-16)
+        image_size: kích thước ảnh (224 cho ViT-B-16)  
+        alpha: độ trong suốt của overlay
+        cmap: colormap cho attention map
+    """
+    # Xử lý image
+    if isinstance(image, torch.Tensor):
+        if image.dim() == 3:
+            image_np = image.permute(1, 2, 0).cpu().numpy()
+        elif image.dim() == 4:
+            image_np = image[0].permute(1, 2, 0).cpu().numpy()
+        else:
+            raise ValueError("Image phải có shape (C,H,W) hoặc (B,C,H,W)")
+    
+    # Normalize image về 0-1
+    if image_np.max() > 1.0:
+        image_np = image_np / 255.0
+    
+    # Reshape attention map về grid không gian
+    num_patches_per_side = image_size // patch_size  # 224//16 = 14
+    attn_grid = attention_map.reshape(num_patches_per_side, num_patches_per_side)
+    
+    # Upsample lên kích thước ảnh
+    attn_upsampled = torch.nn.functional.interpolate(
+        torch.tensor(attn_grid).unsqueeze(0).unsqueeze(0).float(),
+        size=(image_size, image_size),
+        mode='bilinear',
+        align_corners=False
+    ).squeeze().numpy()
+    
+    # Normalize attention 0-1
+    attn_upsampled = (attn_upsampled - attn_upsampled.min()) / (attn_upsampled.max() - attn_upsampled.min() + 1e-8)
+    
+    # Tạo attention map màu
+    cmap_func = plt.get_cmap(cmap)
+    attn_colored = cmap_func(attn_upsampled)[:, :, :3]
+    
+    # Tạo overlay
+    overlay = alpha * attn_colored + (1 - alpha) * image_np
+    
+    # Hiển thị 3 hình
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    
+    # 1. Ảnh gốc
+    axes[0].imshow(image_np)
+    axes[0].set_title('Ảnh Gốc', fontsize=14, fontweight='bold')
+    axes[0].axis('off')
+    
+    # 2. Attention map thuần túy
+    axes[1].imshow(attn_upsampled, cmap='gray', vmin=0, vmax=1)
+    axes[1].set_title('Attention Map', fontsize=14, fontweight='bold')
+    axes[1].axis('off')
+    
+    # 3. Attention map overlay
+    axes[2].imshow(overlay)
+    axes[2].set_title('Attention Map Overlay', fontsize=14, fontweight='bold')
+    axes[2].axis('off')
+    
+    plt.tight_layout()
+    plt.show()
+
+# === Cách gọi sau khi train ===
+# Giả sử bạn có model đã train và sample image
+"""
+# Load model
+model = PromptSGModel(num_class, camera_num, view_num, cfg)
+model.load_param('path/to/trained/model.pth')
+model.eval().cuda()
+
+# Load sample image
+from torchvision import transforms
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+image = transform(Image.open('path/to/image.jpg')).unsqueeze(0).cuda()
+
+# Forward để lấy attention map
+with torch.no_grad():
+    result = model.forward_with_attention(image)
+    attn_map = result['mim_attention'][0, 0]  # (num_patches,)
+
+# Hiển thị
+display_attention_visualization(image[0], attn_map)
+"""
 
 def main():
     import argparse
