@@ -72,11 +72,11 @@ if __name__ == '__main__':
     dataloader_logger.info(f'Val loader length: {len(val_loader)} batches')
     dataloader_logger.info(f'Num query: {num_query}')
     dataloader_logger.info(f'Num classes: {num_classes}')
-    dataloader_logger.info(f'Camera num: {camera_num}')
+    dataloader_logger.info(f'Camera num: {cam_num}')
     dataloader_logger.info(f'View num: {view_num}')
     dataloader_logger.info('======================')
     
-    model = make_model(cfg, num_class=num_classes, camera_num=camera_num, view_num=view_num)
+    model = make_model(cfg, num_class=num_classes, camera_num=cam_num, view_num=view_num)
 
     loss_fn = make_loss(cfg, num_classes=num_classes)
 
