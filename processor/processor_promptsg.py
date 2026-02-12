@@ -88,7 +88,7 @@ def auto_generate_plots(cfg):
         logger.error(f"Error generating plots: {str(e)}")
         return False
 
-def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn, num_query, local_rank):
+def do_train(cfg, model, train_loader, val_loader, query_loader, gallery_loader, optimizer, scheduler, loss_fn, num_query, local_rank):
     log_period = cfg.SOLVER.PROMPTSG.LOG_PERIOD
     checkpoint_period = cfg.SOLVER.PROMPTSG.CHECKPOINT_PERIOD
     eval_period = cfg.SOLVER.PROMPTSG.EVAL_PERIOD
@@ -207,11 +207,23 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
             if cfg.MODEL.DIST_TRAIN:
                 if dist.get_rank() == 0:
                     model.eval()
-                    for n_iter, (img, pid, camid, camids_batch, viewid, img_path) in enumerate(val_loader):
+                    evaluator = R1_mAP_eval(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
+                    evaluator.reset()
+                    
+                    # Extract features for query (with MIM)
+                    for n_iter, (img, pid, camid, camids_batch, viewid, img_path) in enumerate(query_loader):
                         with torch.no_grad():
                             img = img.to(device)
-                            feat = model(img)
+                            feat = model(img, skip_mim=False)  # Apply MIM for query
                             evaluator.update((feat, pid, camid))
+                    
+                    # Extract features for gallery (without MIM)
+                    for n_iter, (img, pid, camid, camids_batch, viewid, img_path) in enumerate(gallery_loader):
+                        with torch.no_grad():
+                            img = img.to(device)
+                            feat = model(img, skip_mim=True)  # Skip MIM for gallery
+                            evaluator.update((feat, pid, camid))
+                    
                     cmc, mAP, _, _, _, _, _ = evaluator.compute()
                     val_msg = "Validation Results - Epoch {}".format(epoch)
                     logger.info(val_msg)
@@ -228,11 +240,21 @@ def do_train(cfg, model, train_loader, val_loader, optimizer, scheduler, loss_fn
                 model.eval()
                 evaluator = R1_mAP_eval(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
                 evaluator.reset()
-                for n_iter, (img, pid, camid, camids_batch, viewid, img_path) in enumerate(val_loader):
+                
+                # Extract features for query (with MIM)
+                for n_iter, (img, pid, camid, camids_batch, viewid, img_path) in enumerate(query_loader):
                     with torch.no_grad():
                         img = img.to(device)
-                        feat = model(img)
+                        feat = model(img, skip_mim=False)  # Apply MIM for query
                         evaluator.update((feat, pid, camid))
+                
+                # Extract features for gallery (without MIM)
+                for n_iter, (img, pid, camid, camids_batch, viewid, img_path) in enumerate(gallery_loader):
+                    with torch.no_grad():
+                        img = img.to(device)
+                        feat = model(img, skip_mim=True)  # Skip MIM for gallery
+                        evaluator.update((feat, pid, camid))
+                
                 cmc, mAP, _, _, _, _, _ = evaluator.compute()
                 val_msg = "Validation Results - Epoch {}".format(epoch)
                 logger.info(val_msg)
@@ -283,11 +305,31 @@ def do_inference(cfg, model, val_loader, num_query):
 
     model.eval()
 
+    # NOTE:
+    # - Historically val_loader contains [query + gallery] in this order.
+    # - Only query should go through MIM, gallery should skip MIM.
+    # - Because val_loader is batched, a batch can straddle the query/gallery boundary.
+    #   We therefore split the batch into two parts: query-part (skip_mim=False) and
+    #   gallery-part (skip_mim=True), then concat features back in the original order.
+    n_seen = 0
     for n_iter, (img, pid, camid, camid_batch, viewid, img_path) in enumerate(val_loader):
         with torch.no_grad():
             img = img.to(device)
-            feat = model(img)
+            B = img.size(0)
+
+            # how many of this batch belong to query?
+            q_remain = max(0, num_query - n_seen)
+            q_bsz = min(B, q_remain)
+
+            feats = []
+            if q_bsz > 0:
+                feats.append(model(img[:q_bsz], skip_mim=False))  # query: with MIM
+            if q_bsz < B:
+                feats.append(model(img[q_bsz:], skip_mim=True))   # gallery: no MIM
+            feat = torch.cat(feats, dim=0) if len(feats) > 1 else feats[0]
+
             evaluator.update((feat, pid, camid))
+            n_seen += B
 
     cmc, mAP, _, _, _, _, _ = evaluator.compute()
     logger.info("Validation Results")

@@ -58,7 +58,7 @@ if __name__ == '__main__':
 
     os.environ['CUDA_VISIBLE_DEVICES'] = cfg.MODEL.DEVICE_ID
 
-    train_loader, val_loader, num_query, num_classes, camera_num, view_num = make_dataloader(cfg)
+    train_loader, val_loader, query_loader, gallery_loader, num_query, num_classes, cam_num, view_num = make_dataloader(cfg)
     
     # Create directory for dataloader logging
     dataloader_log_dir = os.path.join(output_dir, 'make_dataloader_train_logging')
@@ -108,6 +108,8 @@ if __name__ == '__main__':
         model,
         train_loader,
         val_loader,
+        query_loader,
+        gallery_loader,
         optimizer,
         scheduler,
         loss_fn,

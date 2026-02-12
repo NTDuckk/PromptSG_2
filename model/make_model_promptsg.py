@@ -470,7 +470,6 @@ class MultimodalInteractionModule(nn.Module):
         return seq, patch_attn_map
 
 
-
 class PromptSGModel(nn.Module):
     def __init__(self, num_classes, camera_num, view_num, cfg):
         super().__init__()
@@ -583,7 +582,7 @@ class PromptSGModel(nn.Module):
                 "eot_idx": eot_idx.detach().cpu(),   # (1,)
             }
 
-    def forward(self, x=None, label=None, get_image=False, get_text=False, cam_label=None, view_label=None):
+    def forward(self, x=None, label=None, get_image=False, get_text=False, cam_label=None, view_label=None, skip_mim: bool = False):
         """
         Forward pass of PromptSG model
         """
@@ -619,34 +618,52 @@ class PromptSGModel(nn.Module):
         features_intermediate, features_final, features_proj = self.image_encoder(x)
 
         # Extract features based on backbone type
+        # NOTE: during eval we may skip MIM for gallery to save compute
+        need_mim = self.training or (not skip_mim)
+
         if self.model_name == 'ViT-B-16':
             CLS_intermediate = features_intermediate[:, 0]  # (B,768)
             CLS_final = features_final[:, 0]                # (B,768)
             CLS_proj = features_proj[:, 0]                  # (B,512)
 
-            patches = features_proj[:, 1:]                  # (B,M,512)
-            cls_token = features_proj[:, :1]                # (B,1,512)
-
-            v = CLS_proj                                    # (B,512)
+            if need_mim:
+                patches = features_proj[:, 1:]              # (B,M,512)
+                cls_token = features_proj[:, :1]            # (B,1,512)
+                v = CLS_proj                                # (B,512)
 
         elif self.model_name == 'RN50':
             CLS_intermediate = F.avg_pool2d(features_intermediate, features_intermediate.shape[2:]).view(x.shape[0], -1)  # (B,2048)
             CLS_final = F.avg_pool2d(features_final, features_final.shape[2:]).view(x.shape[0], -1)                      # (B,2048)
             CLS_proj = features_proj[0]  # (B,1024)
 
-            if len(features_proj) > 1:
-                # projected spatial features already 512
-                b, c, h, w = features_proj[1].shape  # c = 512
-                patches = features_proj[1].view(b, c, -1).permute(0, 2, 1)  # (B,M,512)
-                cls_token = self.resnet_projection(CLS_proj).unsqueeze(1)    # (B,1,512)
-            else:
-                # fallback: use features_final (1024) -> project to 512
-                b, c, h, w = features_final.shape  # c=1024
-                patches = features_final.view(b, c, -1).permute(0, 2, 1)      # (B,M,1024)
-                patches = self.patch_projection(patches)                      # (B,M,512)
-                cls_token = self.resnet_projection(CLS_proj).unsqueeze(1)     # (B,1,512)
+            if need_mim:
+                if len(features_proj) > 1:
+                    # projected spatial features already 512
+                    b, c, h, w = features_proj[1].shape  # c = 512
+                    patches = features_proj[1].view(b, c, -1).permute(0, 2, 1)  # (B,M,512)
+                    cls_token = self.resnet_projection(CLS_proj).unsqueeze(1)    # (B,1,512)
+                else:
+                    # fallback: use features_final (1024) -> project to 512
+                    b, c, h, w = features_final.shape  # c=1024
+                    patches = features_final.view(b, c, -1).permute(0, 2, 1)      # (B,M,1024)
+                    patches = self.patch_projection(patches)                      # (B,M,512)
+                    cls_token = self.resnet_projection(CLS_proj).unsqueeze(1)     # (B,1,512)
 
-            v = self.inversion_projection(CLS_proj)  # (B,512)
+                v = self.inversion_projection(CLS_proj)  # (B,512)
+
+        # Fast path for gallery during evaluation:
+        # - gallery: do NOT run inversion/text encoder/MIM; only use visual CLS features
+        # - query: goes through full PromptSG pipeline (inversion + text + MIM)
+        if (not self.training) and skip_mim:
+            if self.neck_feat == 'after':
+                feat_gal = self.bottleneck(CLS_final)          # same as query branch (BN on CLS_final)
+                feat_proj_gal = self.bottleneck_proj(CLS_proj) # BN on projected CLS (no MIM)
+                return torch.cat([feat_gal, feat_proj_gal], dim=1)
+            else:
+                # 'before': keep raw features (no BN) like original behavior
+                CLS_final_gal = CLS_final
+                v_final_concat_gal = CLS_proj
+                return torch.cat([CLS_final_gal, v_final_concat_gal], dim=1)
 
         # Generate text features (pooled + full tokens)
         if self.prompt_mode == 'simplified':
