@@ -349,6 +349,31 @@ class MultimodalInteractionModule(nn.Module):
         else:
             raise ValueError(f"Unknown text_query_mode: {self.text_query_mode}")
 
+    def _pool_query(self, seq: torch.Tensor, eot_idx: torch.Tensor = None) -> torch.Tensor:
+        """
+        Pool query sequence -> a single vector (B,D)
+        - if Nq == 1: return that token
+        - else if eot_idx is provided: pick EOT token
+        - else: mean pool
+        """
+        # seq: (B, Nq, D)
+        if seq.dim() != 3:
+            raise ValueError(f"seq must be (B,Nq,D), got {seq.shape}")
+
+        B, Nq, D = seq.shape
+        if Nq == 1:
+            return seq[:, 0, :]  # (B,D)
+
+        if eot_idx is not None:
+            # eot_idx: (B,)
+            idx = eot_idx.to(seq.device).long().clamp_(0, Nq - 1)  # safety clamp
+            # gather along token dimension
+            return seq.gather(1, idx.view(B, 1, 1).expand(B, 1, D)).squeeze(1)  # (B,D)
+
+        # fallback
+        return seq.mean(dim=1)
+
+    
     def _make_attn_map(self, attn_w: torch.Tensor, eot_idx: torch.Tensor):
         # attn_w: (B, H, Nq, M)
         B, H, Nq, M = attn_w.shape
