@@ -14,7 +14,7 @@ MODEL:
     REWEIGHT_MODE: "mul_mean1"   # giữ giống PromptSG
     ENABLE_SUPCON_IN_SIMPLIFIED: false  # PromptSG paper: inference simplified, train composed
     ATTN_POOL_MODE: "mean"
-    KV_MODE: "patch"              # "patch" | "cls_patch"
+    KV_MODE: "cls_patch"              # "patch" | "cls_patch"
     POST_SEQ_MODE: "cls_patch" # "cls_patch" | "cls_text" | "cls_patch_text"
 INPUT:
   SIZE_TRAIN: [256, 128]

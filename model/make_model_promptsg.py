@@ -153,11 +153,9 @@ class PromptComposer(nn.Module):
         prompts = torch.cat([prefix, s_star.unsqueeze(1), suffix], dim=1)
         return prompts, tokenized
 
-
 class QuickGELU(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(1.702 * x)
-
 
 class CrossAttention(nn.Module):
     """
@@ -390,22 +388,31 @@ class MultimodalInteractionModule(nn.Module):
         else:
             raise ValueError(f"Unknown reweight mode: {self.reweight}")
 
-    def forward(self, text_tokens_full, eot_idx, patch_tokens, cls_token, return_cls_states=False):
+    def forward(self, text_tokens_full, eot_idx, patch_tokens, cls_token, return_cls_states: bool = False):
         """
-        text_tokens_full: (B, L, D)  full projected text tokens
-        eot_idx:          (B,)
-        patch_tokens:     (B, M, D)
-        cls_token:        (B, 1, D)
+        PromptSG-style path (paper-faithful):
+          Z = CrossAttn(Q(text_full_or_eot), K/V(image_tokens))   # Eq.(7)
+          Z -> (SelfAttn + FFN) x num_blocks                      # post_blocks
+        Notes:
+          - We DO NOT reweight/aggregate patch tokens into a new patch sequence here.
+          - We still return a pooled attention map over patches for visualization.
+        Inputs:
+          text_tokens_full: (B, L, D)
+          eot_idx:          (B,)
+          patch_tokens:     (B, M, D)
+          cls_token:        (B, 1, D)
+        Returns:
+          seq: (B, Nq, D)   refined query sequence after post blocks
+          patch_attn_map: (B, 1, M) pooled attention over patches
+          cls_states (optional): list[(B,D)] pooled vector after each block (from seq)
         """
-        B, M, D = patch_tokens.shape
-
         # LN
         text_tokens_full = self.q_ln(text_tokens_full)
 
-        # query selection (full/eot)
+        # Query selection (full / eot)
         q = self._build_query(text_tokens_full, eot_idx=eot_idx)  # (B, Nq, D)
 
-        # KV selection: patches only OR (CLS + patches)
+        # KV selection (patch / cls_patch)
         if self.kv_mode == "patch":
             kv_tokens = patch_tokens                                   # (B, M, D)
         elif self.kv_mode == "cls_patch":
@@ -415,55 +422,25 @@ class MultimodalInteractionModule(nn.Module):
 
         kv = self.kv_ln(kv_tokens)
 
-        # explicit cross-attn -> attn weights after softmax
-        attn_out, attn_w = self.cross_attn(q, kv, kv, need_weights=True)      # attn_out: (B,Nq,D), attn_w: (B,H,Nq,Nkv)
+        # Eq.(7): cross-attn output is the query-side sequence Z
+        seq, attn_w = self.cross_attn(q, kv, kv, need_weights=True)     # seq: (B,Nq,D), attn_w: (B,H,Nq,Nkv)
 
-        # attn_map modes (B,1,Nkv)
-        attn_map = self._make_attn_map(attn_w, eot_idx=eot_idx)
+        # Attention map for visualization (pool heads + optionally pool query tokens)
+        attn_map = self._make_attn_map(attn_w, eot_idx=eot_idx)         # (B,1,Nkv)
 
-        # slice patch-only attention map for reweight/visualization compatibility
+        # Slice patch-only map (drop CLS column if present)
         if self.kv_mode == "cls_patch":
-            patch_attn_map = attn_map[:, :, 1:]                        # (B,1,M)
-            # if we normalized over (1+M), re-normalize over patches only
+            patch_attn_map = attn_map[:, :, 1:]                         # (B,1,M)
             if self.attn_map_mode == "mean_head_mean_text_norm":
                 patch_attn_map = patch_attn_map / (patch_attn_map.sum(dim=-1, keepdim=True) + self.eps)
         else:
-            patch_attn_map = attn_map                                  # (B,1,M)
+            patch_attn_map = attn_map                                   # (B,1,M)
 
-        # reweight local patches
-        patch_rw = self._reweight_patches(patch_tokens, patch_attn_map)  # (B,M,D)
-
-        # build refined query tokens from cross-attn output (optional but enabled for modes that include text)
-        q_ref = attn_out
-        #q_ref = attn_out
-
-        # seq for post blocks (self-attn + FFN) - supports multiple composition modes
-        # Backward compatible:
-        #   - "image"       : [CLS, patches]                (old behavior)
-        #   - "text_image"  : [text(ref), CLS, patches]     (like old but uses refined text)
-        # New:
-        #   - "cls_patch"       : [CLS, patches]
-        #   - "cls_text"        : [CLS, text(ref)]
-        #   - "cls_patch_text"  : [CLS, patches, text(ref)]
-        if self.post_seq_mode in ("image", "cls_patch"):
-            seq = torch.cat([cls_token, patch_rw], dim=1)              # (B,1+M,D)
-            cls_index = 0
-        elif self.post_seq_mode == "cls_text":
-            seq = torch.cat([cls_token, q_ref], dim=1)                 # (B,1+Nq,D)
-            cls_index = 0
-        elif self.post_seq_mode == "cls_patch_text":
-            seq = torch.cat([cls_token, patch_rw, q_ref], dim=1)        # (B,1+M+Nq,D)
-            cls_index = 0
-        elif self.post_seq_mode in ("text_image", "text_cls_patch"):
-            seq = torch.cat([q_ref, cls_token, patch_rw], dim=1)        # (B,Nq+1+M,D)
-            cls_index = q_ref.size(1)
-        else:
-            raise ValueError(f"Unknown post_seq_mode: {self.post_seq_mode}")
-
-        cls_states = [seq[:, cls_index, :]]
+        # Post blocks operate on the query sequence (SelfAttn + FFN)
+        cls_states = [self._pool_query(seq, eot_idx=eot_idx)]
         for blk in self.post_blocks:
             seq = blk(seq)
-            cls_states.append(seq[:, cls_index, :])
+            cls_states.append(self._pool_query(seq, eot_idx=eot_idx))
 
         if return_cls_states:
             return seq, patch_attn_map, cls_states
@@ -680,22 +657,34 @@ class PromptSGModel(nn.Module):
             text_tokens_full = tokens
 
         else:
-            s_star = self.inversion(v)  # (B,512)
+            s_star = self.inversion(CLS_final)  # (B,512)
             prompts, tokenized = self.prompt_composer(s_star)
 
             # IMPORTANT: no torch.no_grad(), no detach -> allow gradient to flow back to inversion
-            text_feat, text_tokens_full, eot_idx = self.text_encoder(prompts, tokenized, return_tokens=True)
-
-        # ========== Multimodal Interaction Module (MIM) ==========
-        sequence, attn_map, cls_states = self.mim(
+            text_feat, text_tokens_full, eot_idx = self.text_encoder(prompts, tokenized, return_tokens=True)        # ========== Multimodal Interaction Module (MIM) ==========
+        # Q = full text tokens when COATTN_TEXT_MODE='full'
+        sequence, attn_map = self.mim(
             text_tokens_full=text_tokens_full,
             eot_idx=eot_idx,
             patch_tokens=patches,
             cls_token=cls_token,
-            return_cls_states=True
+            return_cls_states=False
         )
 
-        v_final = cls_states[-1]  # (B,512)
+        # Pool to a single vector (use CLIP EOT/EOS position when query is full tokens)
+        if sequence.dim() == 3:
+            B = sequence.size(0)
+            if sequence.size(1) == 1:
+                v_final = sequence[:, 0, :]  # (B,512)
+            else:
+                v_final = sequence[torch.arange(B, device=sequence.device), eot_idx, :]  # (B,512)
+        else:
+            v_final = sequence  # (B,512)
+
+        # Debug: print shapes once
+        if not hasattr(self, "_logged_mim_seq_shape"):
+            print(f"[MIM] sequence shape={tuple(sequence.shape)} | v_final(EOT) shape={tuple(v_final.shape)}")
+            self._logged_mim_seq_shape = True
 
         # ========== Bottleneck Layers ==========
         feat = self.bottleneck(CLS_final)  # (B,768/2048)
