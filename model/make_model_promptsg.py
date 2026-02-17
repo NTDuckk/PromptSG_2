@@ -657,7 +657,7 @@ class PromptSGModel(nn.Module):
             text_tokens_full = tokens
 
         else:
-            s_star = self.inversion(CLS_final)  # (B,512)
+            s_star = self.inversion(v)  # (B,512)
             prompts, tokenized = self.prompt_composer(s_star)
 
             # IMPORTANT: no torch.no_grad(), no detach -> allow gradient to flow back to inversion
