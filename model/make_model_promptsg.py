@@ -153,93 +153,145 @@ class PromptComposer(nn.Module):
         prompts = torch.cat([prefix, s_star.unsqueeze(1), suffix], dim=1)
         return prompts, tokenized
 
+
 class QuickGELU(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(1.702 * x)
 
+
+# =========================
+# 3 CLASSES REPLACED HERE:
+#   - CrossAttention  (built-in nn.MultiheadAttention)
+#   - SelfAttention   (built-in nn.MultiheadAttention)
+#   - TransformerBlock (SelfAttn + FFN)
+# Everything else kept the same.
+# =========================
+
 class CrossAttention(nn.Module):
     """
-    Explicit cross-attention (no nn.MultiheadAttention):
-      attn = softmax(QK^T / sqrt(d))
-    Q/K/V have separate projections.
+    Built-in cross-attention using nn.MultiheadAttention (batch_first=True).
+    Keep the SAME init signature as your old CrossAttention so the rest of code stays unchanged.
+
+    forward signature kept compatible with existing calls:
+      out, attn_w = self.cross_attn(q, k, v, need_weights=True)
+
+    Shapes:
+      q: (B, Nq, D)
+      k: (B, Nk, D)
+      v: (B, Nk, D)
+      attn_w: (B, H, Nq, Nk)  (per-head weights)
     """
     def __init__(self, embedding_dim: int, num_heads: int, downsample_rate: int = 1, dropout: float = 0.0):
         super().__init__()
         self.embedding_dim = embedding_dim
-        self.internal_dim = embedding_dim // downsample_rate
         self.num_heads = num_heads
+        self.downsample_rate = downsample_rate
+        self.internal_dim = embedding_dim // downsample_rate
+
         assert self.internal_dim % num_heads == 0, "num_heads must divide internal_dim."
 
-        self.q_proj = nn.Linear(embedding_dim, self.internal_dim)
-        self.k_proj = nn.Linear(embedding_dim, self.internal_dim)
-        self.v_proj = nn.Linear(embedding_dim, self.internal_dim)
-        self.out_proj = nn.Linear(self.internal_dim, embedding_dim)
+        # Optional downsample projections (keep compatibility with downsample_rate)
+        if downsample_rate != 1:
+            self.q_proj = nn.Linear(embedding_dim, self.internal_dim)
+            self.k_proj = nn.Linear(embedding_dim, self.internal_dim)
+            self.v_proj = nn.Linear(embedding_dim, self.internal_dim)
+            mha_dim = self.internal_dim
+            self.out_proj = nn.Linear(self.internal_dim, embedding_dim)
+        else:
+            self.q_proj = None
+            self.k_proj = None
+            self.v_proj = None
+            mha_dim = embedding_dim
+            self.out_proj = None
 
-        self.dropout = nn.Dropout(dropout)
-
-    def _separate_heads(self, x, num_heads: int):
-        # x: (B, N, C) -> (B, H, N, C/H)
-        b, n, c = x.shape
-        x = x.reshape(b, n, num_heads, c // num_heads)
-        return x.transpose(1, 2)
-
-    def _recombine_heads(self, x):
-        # x: (B, H, N, Dh) -> (B, N, H*Dh)
-        b, n_heads, n_tokens, c_per_head = x.shape
-        x = x.transpose(1, 2)
-        return x.reshape(b, n_tokens, n_heads * c_per_head)
+        self.mha = nn.MultiheadAttention(
+            embed_dim=mha_dim,
+            num_heads=num_heads,
+            dropout=dropout,          # dropout on attn weights
+            batch_first=True,         # (B,N,D)
+        )
 
     def forward(self, q, k, v, need_weights: bool = False):
-        q = self.q_proj(q)
-        k = self.k_proj(k)
-        v = self.v_proj(v)
+        if self.q_proj is not None:
+            q = self.q_proj(q)
+            k = self.k_proj(k)
+            v = self.v_proj(v)
 
-        q = self._separate_heads(q, self.num_heads)  # (B,H,Nq,Dh)
-        k = self._separate_heads(k, self.num_heads)  # (B,H,Nk,Dh)
-        v = self._separate_heads(v, self.num_heads)  # (B,H,Nk,Dh)
+        out, attn_w = self.mha(
+            query=q,
+            key=k,
+            value=v,
+            need_weights=need_weights,
+            average_attn_weights=False,   # keep per-head weights: (B,H,Nq,Nk)
+        )
 
-        _, _, _, c_per_head = q.shape
-        attn = q @ k.permute(0, 1, 3, 2)             # (B,H,Nq,Nk)
-        attn = attn / (c_per_head ** 0.5)
-        attn = torch.softmax(attn, dim=-1)           # softmax over Nk
-        attn = self.dropout(attn)
-
-        out = attn @ v                               # (B,H,Nq,Dh)
-        out = self._recombine_heads(out)             # (B,Nq,internal_dim)
-        out = self.out_proj(out)                     # (B,Nq,D)
+        if self.out_proj is not None:
+            out = self.out_proj(out)
 
         if need_weights:
-            return out, attn
+            return out, attn_w
         return out
 
 
 class SelfAttention(nn.Module):
-    """Explicit self-attention (no nn.MultiheadAttention)"""
+    """
+    Built-in self-attention using nn.MultiheadAttention (batch_first=True).
+    Keep SAME init signature as old SelfAttention for minimal changes.
+    """
     def __init__(self, dim, num_heads=8, qkv_bias=True, dropout=0.0):
         super().__init__()
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = head_dim ** -0.5
-
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.attn_drop = nn.Dropout(dropout)
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(dropout)
+        # qkv_bias kept for compatibility (MultiheadAttention has bias=True by default)
+        self.mha = nn.MultiheadAttention(
+            embed_dim=dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+            bias=True
+        )
 
     def forward(self, x):
-        B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]  # (B,H,N,Dh)
+        out, _ = self.mha(
+            query=x, key=x, value=x,
+            need_weights=False
+        )
+        return out
 
-        attn = (q @ k.transpose(-2, -1)) * self.scale  # (B,H,N,N)
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
 
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
+class TransformerBlock(nn.Module):
+    """
+    Standard Transformer block (Pre-LN):
+      x = x + DropPath(SelfAttn(LN(x)))
+      x = x + DropPath(FFN(LN(x)))
+
+    (FFN uses built-in Linear/Dropout + chosen activation)
+    """
+    def __init__(self, d_model=512, nhead=8, mlp_ratio=4.0, drop_path=0.0,
+                 attn_drop=0.0, proj_drop=0.0, act_layer=QuickGELU):
+        super().__init__()
+        self.norm1 = LayerNorm(d_model)
+        self.attn = SelfAttention(dim=d_model, num_heads=nhead, qkv_bias=True, dropout=attn_drop)
+        self.norm2 = LayerNorm(d_model)
+
+        hidden = int(d_model * mlp_ratio)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, hidden),
+            act_layer(),
+            nn.Dropout(proj_drop),
+            nn.Linear(hidden, d_model),
+            nn.Dropout(proj_drop),
+        )
+
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
+    def forward(self, x):
+        x = x + self.drop_path(self.attn(self.norm1(x)))
+        x = x + self.drop_path(self.ffn(self.norm2(x)))
         return x
 
+
+# =========================
+# Everything below kept the same (except PostCABlock now just uses TransformerBlock).
+# =========================
 
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=QuickGELU, drop=0.0):
@@ -260,26 +312,12 @@ class Mlp(nn.Module):
         return x
 
 
-class PostCABlock(nn.Module):
+class PostCABlock(TransformerBlock):
     """
-    Residual ViT block (chuẩn residual như code mới):
-      x = x + Attn(LN(x))
-      x = x + MLP(LN(x))
+    Backward-compatible name for your code.
+    Now implemented by TransformerBlock (SelfAttn + FFN).
     """
-    def __init__(self, d_model=512, nhead=8, mlp_ratio=4.0, drop_path=0.0,
-                 attn_drop=0.0, proj_drop=0.0, act_layer=QuickGELU):
-        super().__init__()
-        self.norm1 = LayerNorm(d_model)
-        self.attn = SelfAttention(dim=d_model, num_heads=nhead, qkv_bias=True, dropout=attn_drop)
-        self.norm2 = LayerNorm(d_model)
-        hidden_features = int(d_model * mlp_ratio)
-        self.mlp = Mlp(in_features=d_model, hidden_features=hidden_features, act_layer=act_layer, drop=proj_drop)
-        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-
-    def forward(self, x):
-        x = x + self.drop_path(self.attn(self.norm1(x)))
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
-        return x
+    pass
 
 
 class MultimodalInteractionModule(nn.Module):
@@ -373,7 +411,6 @@ class MultimodalInteractionModule(nn.Module):
         # fallback
         return seq.mean(dim=1)
 
-    
     def _make_attn_map(self, attn_w: torch.Tensor, eot_idx: torch.Tensor):
         # attn_w: (B, H, Nq, M)
         B, H, Nq, M = attn_w.shape
@@ -382,7 +419,7 @@ class MultimodalInteractionModule(nn.Module):
 
         if self.attn_map_mode == "mean_head_mean_text_norm":
             attn_map = pool_fn(attn_w, dim=1)                  # (B, Nq, M)
-            attn_map = attn_map.mean(dim=1, keepdim=True)  # (B, 1, M)
+            attn_map = attn_map.mean(dim=1, keepdim=True)      # (B, 1, M)
             attn_map = attn_map / (attn_map.sum(dim=-1, keepdim=True) + self.eps)
             return attn_map
 
