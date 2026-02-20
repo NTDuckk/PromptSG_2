@@ -225,18 +225,31 @@ class VisionTransformer(nn.Module):
         
         x = x.permute(1, 0, 2)  # NLD -> LND
         
-        x11 = self.transformer.resblocks[:11](x) 
-        x12 = self.transformer.resblocks[11](x11) 
-        x11 = x11.permute(1, 0, 2)  # LND -> NLD  
-        x12 = x12.permute(1, 0, 2)  # LND -> NLD  
+        x11 = self.transformer.resblocks[:11](x)
+        x12 = self.transformer.resblocks[11](x11)
 
-        x12 = self.ln_post(x12) 
+        # LND -> NLD
+        x11 = x11.permute(1, 0, 2)
+        x12 = x12.permute(1, 0, 2)
 
+        # CLS at block-11 output (pre-ln_post)
+        cls_x11 = x11[:, 0]  # (B, width=768)
+
+        # CLIP-style post LN
+        x12 = self.ln_post(x12)
+
+        # Project block-11 tokens to 512 (match xproj pipeline: LN + @proj)
+        x11_ln = self.ln_post(x11)
+
+        xproj = None
+        xproj11 = None
         if self.proj is not None:
-            xproj = x12 @ self.proj   
+            xproj = x12 @ self.proj      # (B, 1+M, 512)
+            xproj11 = x11_ln @ self.proj # (B, 1+M, 512)
 
         if return_intermediate:
-            return x11, x12, xproj
+            # extra returns for PromptSG training
+            return x11, x12, xproj, cls_x11, xproj11
 
         return x11, x12, xproj
 

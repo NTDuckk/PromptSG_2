@@ -659,7 +659,14 @@ class PromptSGModel(nn.Module):
                 return features_proj[:, 0]
 
         # Main forward pass for training/inference
-        features_intermediate, features_final, features_proj = self.image_encoder(x)
+        # For ViT we optionally return extra tensors for the x11-branch (cls_x11, xproj11)
+        if self.model_name == 'ViT-B-16':
+            features_intermediate, features_final, features_proj, cls_x11, features_proj11 = self.image_encoder(
+                x, return_intermediate=True
+            )
+        else:
+            features_intermediate, features_final, features_proj = self.image_encoder(x)
+            cls_x11, features_proj11 = None, None
 
         # Extract features based on backbone type
         # NOTE: during eval we may skip MIM for gallery to save compute
@@ -669,6 +676,16 @@ class PromptSGModel(nn.Module):
             CLS_intermediate = features_intermediate[:, 0]  # (B,768)
             CLS_final = features_final[:, 0]                # (B,768)
             CLS_proj = features_proj[:, 0]                  # (B,512)
+
+            # x11 projected tokens (LN + @proj) for the new triplet branch
+            # - cls_x11: (B,768) already returned by ViT (redundant but kept for clarity)
+            # - features_proj11: (B,1+M,512)
+            if features_proj11 is not None:
+                CLS_proj11 = features_proj11[:, 0]           # (B,512)
+                patches11 = features_proj11[:, 1:]           # (B,M,512)
+                cls_token11 = features_proj11[:, :1]         # (B,1,512)
+            else:
+                CLS_proj11, patches11, cls_token11 = None, None, None
 
             if need_mim:
                 patches = features_proj[:, 1:]              # (B,M,512)
@@ -748,6 +765,39 @@ class PromptSGModel(nn.Module):
         else:
             v_final = sequence  # (B,512)
 
+        # ===== New: x11-branch MIM feature for Triplet (replace CLS_intermediate) =====
+        # - Use CLS_proj11 (x11 projected to 512) -> inversion -> composed prompt -> text encoder
+        # - Run MIM with x11's (cls/patch) tokens to get a 512-D feature
+        # - Only used for training triplet; SupCon + ID remain unchanged.
+        v_final_11 = CLS_intermediate
+        if self.training and (self.model_name == 'ViT-B-16') and (CLS_proj11 is not None) and (cls_token11 is not None):
+            if self.prompt_mode == 'simplified':
+                # simplified mode has no s*: reuse cached text tokens
+                text_tokens_full_11 = text_tokens_full
+                eot_idx_11 = eot_idx
+            else:
+                s_star_11 = self.inversion(CLS_proj11)  # (B,512)
+                prompts_11, tokenized_11 = self.prompt_composer(s_star_11)
+                _, text_tokens_full_11, eot_idx_11 = self.text_encoder(prompts_11, tokenized_11, return_tokens=True)
+
+            seq11, _ = self.mim(
+                text_tokens_full=text_tokens_full_11,
+                eot_idx=eot_idx_11,
+                patch_tokens=patches11,
+                cls_token=cls_token11,
+                return_cls_states=False,
+            )
+
+            # pool seq11 -> (B,512)
+            if seq11.dim() == 3:
+                B11 = seq11.size(0)
+                if seq11.size(1) == 1:
+                    v_final_11 = seq11[:, 0, :]
+                else:
+                    v_final_11 = seq11[torch.arange(B11, device=seq11.device), eot_idx_11, :]
+            else:
+                v_final_11 = seq11
+
         # Debug: print shapes once
         if not hasattr(self, "_logged_mim_seq_shape"):
             print(f"[MIM] sequence shape={tuple(sequence.shape)} | v_final(EOT) shape={tuple(v_final.shape)}")
@@ -769,7 +819,8 @@ class PromptSGModel(nn.Module):
             cls_score_proj = self.classifier_proj(feat_proj)
 
             # multi-scale triplet features like your original
-            triplet_feats = [CLS_intermediate, CLS_final, v_final]
+            # Replace CLS_intermediate with x11-branch MIM output
+            triplet_feats = [v_final_11, CLS_final, v_final]
 
             return [cls_score, cls_score_proj], triplet_feats, v, text_feat
 
