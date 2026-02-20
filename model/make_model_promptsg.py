@@ -404,7 +404,7 @@ class MultimodalInteractionModule(nn.Module):
 
         if eot_idx is not None:
             # eot_idx: (B,)
-            idx = eot_idx.to(seq.device).long().clamp_(0, Nq - 1)  # safety clamp
+            idx = eot_idx.to(seq.device).long().clamp(0, Nq - 1)  # safety clamp
             # gather along token dimension
             return seq.gather(1, idx.view(B, 1, 1).expand(B, 1, D)).squeeze(1)  # (B,D)
 
