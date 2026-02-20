@@ -479,6 +479,8 @@ class MultimodalInteractionModule(nn.Module):
             kv_tokens = patch_tokens                                   # (B, M, D)
         elif self.kv_mode == "cls_patch":
             kv_tokens = torch.cat([cls_token, patch_tokens], dim=1)    # (B, 1+M, D)
+        elif self.kv_mode == "cls":
+            kv_tokens = cls_token                                      # (B, 1, D)
         else:
             raise ValueError(f"Unknown kv_mode: {self.kv_mode}")
 
@@ -495,6 +497,9 @@ class MultimodalInteractionModule(nn.Module):
             patch_attn_map = attn_map[:, :, 1:]                         # (B,1,M)
             if self.attn_map_mode == "mean_head_mean_text_norm":
                 patch_attn_map = patch_attn_map / (patch_attn_map.sum(dim=-1, keepdim=True) + self.eps)
+        elif self.kv_mode == "cls":
+            # Khi chỉ dùng CLS token, không có patch tokens -> patch_attn_map có thể để None hoặc giữ nguyên (B,1,1)
+            patch_attn_map = attn_map  # (B,1,1) – không dùng cho patch visualization
         else:
             patch_attn_map = attn_map                                   # (B,1,M)
 
