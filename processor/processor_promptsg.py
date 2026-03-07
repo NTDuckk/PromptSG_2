@@ -388,11 +388,11 @@ def do_train(cfg, model, train_loader, val_loader, query_loader, gallery_loader,
                             feat = model(img, skip_mim=False)  # Apply MIM for query
                             evaluator.update((feat, pid, camid))
                     
-                    # Extract features for gallery (without MIM)
+                    # Extract features for gallery
                     for n_iter, (img, pid, camid, camids_batch, viewid, img_path) in enumerate(gallery_loader):
                         with torch.no_grad():
                             img = img.to(device)
-                            feat = model(img, skip_mim=True)  # Skip MIM for gallery
+                            feat = model(img, skip_mim=False)  # Apply MIM for gallery
                             evaluator.update((feat, pid, camid))
                     
                     cmc, mAP, _, _, _, _, _ = evaluator.compute()
@@ -423,7 +423,7 @@ def do_train(cfg, model, train_loader, val_loader, query_loader, gallery_loader,
                 for n_iter, (img, pid, camid, camids_batch, viewid, img_path) in enumerate(gallery_loader):
                     with torch.no_grad():
                         img = img.to(device)
-                        feat = model(img, skip_mim=True)  # Skip MIM for gallery
+                        feat = model(img, skip_mim=False)  # Skip MIM for gallery
                         evaluator.update((feat, pid, camid))
                 
                 cmc, mAP, _, _, _, _, _ = evaluator.compute()
@@ -481,7 +481,7 @@ def do_inference(cfg, model, val_loader, num_query):
     # - Only query should go through MIM, gallery should skip MIM.
     # - Because val_loader is batched, a batch can straddle the query/gallery boundary.
     #   We therefore split the batch into two parts: query-part (skip_mim=False) and
-    #   gallery-part (skip_mim=True), then concat features back in the original order.
+    #   gallery-part (skip_mim=False), then concat features back in the original order.
     n_seen = 0
     for n_iter, (img, pid, camid, camid_batch, viewid, img_path) in enumerate(val_loader):
         with torch.no_grad():
@@ -496,7 +496,7 @@ def do_inference(cfg, model, val_loader, num_query):
             if q_bsz > 0:
                 feats.append(model(img[:q_bsz], skip_mim=False))  # query: with MIM
             if q_bsz < B:
-                feats.append(model(img[q_bsz:], skip_mim=True))   # gallery: no MIM
+                feats.append(model(img[q_bsz:], skip_mim=False))  # gallery: with MIM
             feat = torch.cat(feats, dim=0) if len(feats) > 1 else feats[0]
 
             evaluator.update((feat, pid, camid))

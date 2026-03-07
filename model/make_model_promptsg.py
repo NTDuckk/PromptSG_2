@@ -670,7 +670,7 @@ class PromptSGModel(nn.Module):
 
         # Extract features based on backbone type
         # NOTE: during eval we may skip MIM for gallery to save compute
-        need_mim = self.training or (not skip_mim)
+        need_mim = True
 
         if self.model_name == 'ViT-B-16':
             CLS_intermediate = features_intermediate[:, 0]  # (B,768)
@@ -712,20 +712,6 @@ class PromptSGModel(nn.Module):
 
                 v = self.inversion_projection(CLS_proj)  # (B,512)
 
-        # Fast path for gallery during evaluation:
-        # - gallery: do NOT run inversion/text encoder/MIM; only use visual CLS features
-        # - query: goes through full PromptSG pipeline (inversion + text + MIM)
-        if (not self.training) and skip_mim:
-            if self.neck_feat == 'after':
-                feat_gal = self.bottleneck(CLS_final)          # same as query branch (BN on CLS_final)
-                feat_proj_gal = self.bottleneck_proj(CLS_proj) # BN on projected CLS (no MIM)
-                return torch.cat([feat_gal, feat_proj_gal], dim=1)
-            else:
-                # 'before': keep raw features (no BN) like original behavior
-                CLS_final_gal = CLS_final
-                v_final_concat_gal = CLS_proj
-                return torch.cat([CLS_final_gal, v_final_concat_gal], dim=1)
-
         # Generate text features (pooled + full tokens)
         if self.prompt_mode == 'simplified':
             self._ensure_text_features()
@@ -765,39 +751,7 @@ class PromptSGModel(nn.Module):
         else:
             v_final = sequence  # (B,512)
 
-        # ===== New: x11-branch MIM feature for Triplet (replace CLS_intermediate) =====
-        # - Use CLS_proj11 (x11 projected to 512) -> inversion -> composed prompt -> text encoder
-        # - Run MIM with x11's (cls/patch) tokens to get a 512-D feature
-        # - Only used for training triplet; SupCon + ID remain unchanged.
-        v_final_11 = CLS_intermediate
-        if self.training and (self.model_name == 'ViT-B-16') and (CLS_proj11 is not None) and (cls_token11 is not None):
-            if self.prompt_mode == 'simplified':
-                # simplified mode has no s*: reuse cached text tokens
-                text_tokens_full_11 = text_tokens_full
-                eot_idx_11 = eot_idx
-            else:
-                s_star_11 = self.inversion(CLS_proj11)  # (B,512)
-                prompts_11, tokenized_11 = self.prompt_composer(s_star_11)
-                _, text_tokens_full_11, eot_idx_11 = self.text_encoder(prompts_11, tokenized_11, return_tokens=True)
-
-            seq11, _ = self.mim(
-                text_tokens_full=text_tokens_full_11,
-                eot_idx=eot_idx_11,
-                patch_tokens=patches11,
-                cls_token=cls_token11,
-                return_cls_states=False,
-            )
-
-            # pool seq11 -> (B,512)
-            if seq11.dim() == 3:
-                B11 = seq11.size(0)
-                if seq11.size(1) == 1:
-                    v_final_11 = seq11[:, 0, :]
-                else:
-                    v_final_11 = seq11[torch.arange(B11, device=seq11.device), eot_idx_11, :]
-            else:
-                v_final_11 = seq11
-
+        # PromptSG paper-faithful: use the original ViT hidden states for triplet.
         # Debug: print shapes once
         if not hasattr(self, "_logged_mim_seq_shape"):
             print(f"[MIM] sequence shape={tuple(sequence.shape)} | v_final(EOT) shape={tuple(v_final.shape)}")
@@ -818,9 +772,9 @@ class PromptSGModel(nn.Module):
             cls_score = self.classifier(feat)
             cls_score_proj = self.classifier_proj(feat_proj)
 
-            # multi-scale triplet features like your original
-            # Replace CLS_intermediate with x11-branch MIM output
-            triplet_feats = [v_final_11, CLS_final, v_final]
+            # PromptSG paper-faithful triplet features:
+            # final hidden states + preceding two layer states
+            triplet_feats = [CLS_intermediate, CLS_final, v_final]
 
             return [cls_score, cls_score_proj], triplet_feats, v, text_feat
 
