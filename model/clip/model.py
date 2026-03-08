@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+
 class Bottleneck(nn.Module):
     expansion = 4
 
@@ -50,6 +51,7 @@ class Bottleneck(nn.Module):
         out += identity
         out = self.relu(out)
         return out
+
 
 class AttentionPool2d(nn.Module):
     def __init__(self, spacial_dim: int, embed_dim: int, num_heads: int, output_dim: int = None):
@@ -213,7 +215,7 @@ class VisionTransformer(nn.Module):
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
-    def forward(self, x: torch.Tensor, cv_emb = None, return_intermediate: bool = False):
+    def forward(self, x: torch.Tensor, cv_emb = None):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
@@ -225,31 +227,15 @@ class VisionTransformer(nn.Module):
         
         x = x.permute(1, 0, 2)  # NLD -> LND
         
-        x11 = self.transformer.resblocks[:11](x)
-        x12 = self.transformer.resblocks[11](x11)
+        x11 = self.transformer.resblocks[:11](x) 
+        x12 = self.transformer.resblocks[11](x11) 
+        x11 = x11.permute(1, 0, 2)  # LND -> NLD  
+        x12 = x12.permute(1, 0, 2)  # LND -> NLD  
 
-        # LND -> NLD
-        x11 = x11.permute(1, 0, 2)
-        x12 = x12.permute(1, 0, 2)
+        x12 = self.ln_post(x12)  
 
-        # CLS at block-11 output (pre-ln_post)
-        cls_x11 = x11[:, 0]  # (B, width=768)
-
-        # CLIP-style post LN
-        x12 = self.ln_post(x12)
-
-        # Project block-11 tokens to 512 (match xproj pipeline: LN + @proj)
-        x11_ln = self.ln_post(x11)
-
-        xproj = None
-        xproj11 = None
         if self.proj is not None:
-            xproj = x12 @ self.proj      # (B, 1+M, 512)
-            xproj11 = x11_ln @ self.proj # (B, 1+M, 512)
-
-        if return_intermediate:
-            # extra returns for PromptSG training
-            return x11, x12, xproj, cls_x11, xproj11
+            xproj = x12 @ self.proj   
 
         return x11, x12, xproj
 
