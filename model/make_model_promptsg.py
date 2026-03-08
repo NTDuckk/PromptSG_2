@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 from typing import Optional
@@ -157,7 +158,7 @@ class PromptSGReID(nn.Module):
         self.w_resolution = int((cfg.INPUT.SIZE_TRAIN[1] - 16) // cfg.MODEL.STRIDE_SIZE[1] + 1)
         self.vision_stride_size = cfg.MODEL.STRIDE_SIZE[0]
 
-        clip_model = load_clip_to_cpu(self.model_name, self.h_resolution, self.w_resolution, self.vision_stride_size)
+        clip_model = load_clip_to_cpu(cfg, self.model_name, self.h_resolution, self.w_resolution, self.vision_stride_size)
         clip_model.to('cuda')
 
         self.image_encoder = clip_model.visual
@@ -362,17 +363,39 @@ class PromptSGReID(nn.Module):
 from .clip import clip as _clip_module
 
 
-def load_clip_to_cpu(backbone_name, h_resolution, w_resolution, vision_stride_size):
-    url = _clip_module._MODELS[backbone_name]
-    model_path = _clip_module._download(url)
+def load_clip_to_cpu(cfg, backbone_name, h_resolution, w_resolution, vision_stride_size):
+    # 1) prefer explicit local path from config
+    model_path = getattr(cfg.MODEL, "PRETRAIN_PATH", "")
+    if model_path is None:
+        model_path = ""
+
+    # 2) if not provided, try existing CLIP cache directly
+    if model_path == "":
+        cache_path = os.path.expanduser("~/.cache/clip/{}.pt".format(backbone_name))
+        if os.path.isfile(cache_path):
+            model_path = cache_path
+
+    # 3) only download when no local/cache file is available
+    if model_path == "":
+        url = clip._MODELS[backbone_name]
+        model_path = clip._download(url)
+
+    print("Loading CLIP backbone from {}".format(model_path))
 
     try:
-        model = torch.jit.load(model_path, map_location='cpu').eval()
+        # loading JIT archive
+        model = torch.jit.load(model_path, map_location="cpu").eval()
         state_dict = None
     except RuntimeError:
-        state_dict = torch.load(model_path, map_location='cpu')
+        state_dict = torch.load(model_path, map_location="cpu")
 
-    model = _clip_module.build_model(state_dict or model.state_dict(), h_resolution, w_resolution, vision_stride_size)
+    model = clip.build_model(
+        state_dict or model.state_dict(),
+        h_resolution,
+        w_resolution,
+        vision_stride_size
+    )
+
     return model
 
 
