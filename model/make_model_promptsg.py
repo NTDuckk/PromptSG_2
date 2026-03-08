@@ -99,6 +99,12 @@ class PromptComposer(nn.Module):
         tokenized_composed = clip.tokenize(composed_template)
         tokenized_simplified = clip.tokenize(simplified_template)
 
+        # Ensure token index tensors are on the same device as the token embedding
+        # to avoid CPU/CUDA device mismatch when calling the embedding module.
+        device = token_embedding.weight.device
+        tokenized_composed = tokenized_composed.to(device)
+        tokenized_simplified = tokenized_simplified.to(device)
+
         with torch.no_grad():
             composed_embedding = token_embedding(tokenized_composed).type(dtype)
             simplified_embedding = token_embedding(tokenized_simplified).type(dtype)
