@@ -15,36 +15,35 @@ from utils.metrics import R1_mAP_eval
 
 
 def _unwrap_model(model):
-    return model.module if hasattr(model, 'module') else model
+    return model.module if hasattr(model, "module") else model
 
 
 def _build_losses(cfg, num_classes, device):
-    if getattr(cfg.MODEL, 'IF_LABELSMOOTH', 'off') == 'on':
+    if getattr(cfg.MODEL, "IF_LABELSMOOTH", "off") == "on":
         id_criterion = CrossEntropyLabelSmooth(num_classes=num_classes)
     else:
         id_criterion = nn.CrossEntropyLoss()
 
-    margin = getattr(cfg.SOLVER, 'MARGIN', 0.3)
+    margin = getattr(cfg.SOLVER, "MARGIN", 0.3)
     triplet = TripletLoss(margin=margin)
     supcon = SupConLoss(device)
     return id_criterion, triplet, supcon
 
 
 def _compute_promptsg_loss(outputs, pids, id_criterion, triplet, supcon, cfg):
-    id_loss = id_criterion(outputs['cls_score'], pids)
+    id_loss = id_criterion(outputs["cls_score"], pids)
 
     tri_loss = 0.0
-    for feat in outputs['triplet_feats']:
+    for feat in outputs["triplet_feats"]:
         tri_loss = tri_loss + triplet(feat, pids)[0]
 
-    image_feat = torch.nn.functional.normalize(outputs['global_image'], dim=1)
-    text_feat = torch.nn.functional.normalize(outputs['text_feat'], dim=1)
+    image_feat = torch.nn.functional.normalize(outputs["global_image"], dim=1)
+    text_feat = torch.nn.functional.normalize(outputs["text_feat"], dim=1)
     sup_loss = supcon(text_feat, image_feat, pids, pids) + supcon(image_feat, text_feat, pids, pids)
 
-    id_w = getattr(cfg.MODEL, 'ID_LOSS_WEIGHT', 1.0)
-    tri_w = getattr(cfg.MODEL, 'TRIPLET_LOSS_WEIGHT', 1.0)
-    # use I2T_LOSS_WEIGHT as lambda for SupCon to stay compatible with the current config.
-    sup_w = getattr(cfg.MODEL, 'I2T_LOSS_WEIGHT', 0.5)
+    id_w = getattr(cfg.MODEL, "ID_LOSS_WEIGHT", 1.0)
+    tri_w = getattr(cfg.MODEL, "TRIPLET_LOSS_WEIGHT", 1.0)
+    sup_w = getattr(cfg.MODEL, "SUPCON_LOSS_WEIGHT", 0.5)
 
     total = id_w * id_loss + tri_w * tri_loss + sup_w * sup_loss
     return total, id_loss, tri_loss, sup_loss
@@ -60,22 +59,25 @@ def do_train_promptsg(
     num_query,
     num_classes,
     local_rank=0,
-    eval_prompt_mode='simplified',
+    eval_prompt_mode="simplified",
 ):
-    logger = logging.getLogger('transreid.train')
-    logger.info('start PromptSG training')
+    logger = logging.getLogger("transreid.train")
+    logger.info("start PromptSG training")
 
-    device = 'cuda'
-    epochs = cfg.SOLVER.STAGE2.MAX_EPOCHS
-    log_period = cfg.SOLVER.STAGE2.LOG_PERIOD
-    checkpoint_period = cfg.SOLVER.STAGE2.CHECKPOINT_PERIOD
-    eval_period = cfg.SOLVER.STAGE2.EVAL_PERIOD
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    if device:
-        model.to(local_rank)
-        if torch.cuda.device_count() > 1:
-            print('Using {} GPUs for training'.format(torch.cuda.device_count()))
-            model = nn.DataParallel(model)
+    epochs = cfg.SOLVER.MAX_EPOCHS
+    log_period = cfg.SOLVER.LOG_PERIOD
+    checkpoint_period = cfg.SOLVER.CHECKPOINT_PERIOD
+    eval_period = cfg.SOLVER.EVAL_PERIOD
+
+    if cfg.OUTPUT_DIR:
+        os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
+
+    model.to(device)
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1 and not hasattr(model, "module"):
+        print("Using {} GPUs for training".format(torch.cuda.device_count()))
+        model = nn.DataParallel(model)
 
     base_model = _unwrap_model(model)
     base_model.set_inference_prompt_mode(eval_prompt_mode)
@@ -87,8 +89,11 @@ def do_train_promptsg(
     acc_meter = AverageMeter()
 
     evaluator = R1_mAP_eval(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
-    scaler = amp.GradScaler()
+    scaler = amp.GradScaler(enabled=torch.cuda.is_available())
     id_criterion, triplet, supcon = _build_losses(cfg, num_classes, device)
+
+    use_sie_camera = getattr(cfg.MODEL, "SIE_CAMERA", False)
+    use_sie_view = getattr(cfg.MODEL, "SIE_VIEW", False)
 
     all_start_time = time.monotonic()
     best_mAP = -1.0
@@ -109,16 +114,18 @@ def do_train_promptsg(
 
             img = img.to(device)
             target = vid.to(device)
-            if cfg.MODEL.SIE_CAMERA:
+
+            if use_sie_camera:
                 target_cam = target_cam.to(device)
             else:
                 target_cam = None
-            if cfg.MODEL.SIE_VIEW:
+
+            if use_sie_view:
                 target_view = target_view.to(device)
             else:
                 target_view = None
 
-            with amp.autocast(enabled=True):
+            with amp.autocast(enabled=torch.cuda.is_available()):
                 outputs = model(x=img, label=target, cam_label=target_cam, view_label=target_view)
                 loss, id_loss, tri_loss, sup_loss = _compute_promptsg_loss(
                     outputs, target, id_criterion, triplet, supcon, cfg
@@ -129,18 +136,21 @@ def do_train_promptsg(
             scaler.update()
 
             with torch.no_grad():
-                acc = (outputs['cls_score'].max(1)[1] == target).float().mean()
+                acc = (outputs["cls_score"].max(1)[1] == target).float().mean()
 
             loss_meter.update(loss.item(), img.shape[0])
             id_meter.update(id_loss.item(), img.shape[0])
-            tri_meter.update(float(tri_loss.item() if hasattr(tri_loss, 'item') else tri_loss), img.shape[0])
+            tri_meter.update(float(tri_loss.item() if hasattr(tri_loss, "item") else tri_loss), img.shape[0])
             sup_meter.update(sup_loss.item(), img.shape[0])
             acc_meter.update(acc.item(), 1)
 
             if (n_iter + 1) % log_period == 0:
-                current_lrs = [group['lr'] for group in optimizer.param_groups]
+                current_lrs = [group["lr"] for group in optimizer.param_groups]
+                vis_lr = current_lrs[0]
+                new_lr = current_lrs[1] if len(current_lrs) > 1 else current_lrs[0]
                 logger.info(
-                    'Epoch[{}] Iteration[{}/{}] Loss: {:.3f}, ID: {:.3f}, TRI: {:.3f}, SupCon: {:.3f}, Acc: {:.3f}, Lr(vis/new): {:.2e}/{:.2e}'.format(
+                    "Epoch[{}] Iteration[{}/{}] Loss: {:.3f}, ID: {:.3f}, TRI: {:.3f}, "
+                    "SupCon: {:.3f}, Acc: {:.3f}, Lr(vis/new): {:.2e}/{:.2e}".format(
                         epoch,
                         n_iter + 1,
                         len(train_loader),
@@ -149,8 +159,8 @@ def do_train_promptsg(
                         tri_meter.avg,
                         sup_meter.avg,
                         acc_meter.avg,
-                        current_lrs[0],
-                        current_lrs[1] if len(current_lrs) > 1 else current_lrs[0],
+                        vis_lr,
+                        new_lr,
                     )
                 )
 
@@ -159,14 +169,18 @@ def do_train_promptsg(
         end_time = time.time()
         time_per_batch = (end_time - start_time) / max(1, (n_iter + 1))
         logger.info(
-            'Epoch {} done. Time per batch: {:.3f}[s] Speed: {:.1f}[samples/s]'.format(
-                epoch, time_per_batch, train_loader.batch_size / max(time_per_batch, 1e-12)
+            "Epoch {} done. Time per batch: {:.3f}[s] Speed: {:.1f}[samples/s]".format(
+                epoch,
+                time_per_batch,
+                train_loader.batch_size / max(time_per_batch, 1e-12),
             )
         )
 
         if epoch % checkpoint_period == 0:
-            ckpt_path = os.path.join(cfg.OUTPUT_DIR, cfg.MODEL.NAME + '_promptsg_epoch{}.pth'.format(epoch))
-            torch.save(model.state_dict(), ckpt_path)
+            ckpt_name = "{}_promptsg_epoch{}.pth".format(cfg.MODEL.NAME, epoch)
+            ckpt_path = os.path.join(cfg.OUTPUT_DIR, ckpt_name) if cfg.OUTPUT_DIR else ckpt_name
+            torch.save(_unwrap_model(model).state_dict(), ckpt_path)
+            logger.info("Saved checkpoint to {}".format(ckpt_path))
 
         if epoch % eval_period == 0:
             rank1, rank5, mAP = do_inference_promptsg(
@@ -175,26 +189,29 @@ def do_train_promptsg(
                 val_loader=val_loader,
                 num_query=num_query,
                 prompt_mode=eval_prompt_mode,
-                logger_name='transreid.train',
+                logger_name="transreid.train",
                 save_result=False,
             )
             logger.info(
-                'Validation Results - Epoch: {} | prompt_mode={} | mAP: {:.1%} | Rank-1: {:.1%} | Rank-5: {:.1%}'.format(
+                "Validation Results - Epoch: {} | prompt_mode={} | mAP: {:.1%} | "
+                "Rank-1: {:.1%} | Rank-5: {:.1%}".format(
                     epoch, eval_prompt_mode, mAP, rank1, rank5
                 )
             )
             if mAP > best_mAP:
                 best_mAP = mAP
                 best_rank1 = rank1
-                best_path = os.path.join(cfg.OUTPUT_DIR, cfg.MODEL.NAME + '_promptsg_best.pth')
-                torch.save(model.state_dict(), best_path)
-                logger.info('Saved new best checkpoint to {}'.format(best_path))
-            torch.cuda.empty_cache()
+                best_name = "{}_promptsg_best.pth".format(cfg.MODEL.NAME)
+                best_path = os.path.join(cfg.OUTPUT_DIR, best_name) if cfg.OUTPUT_DIR else best_name
+                torch.save(_unwrap_model(model).state_dict(), best_path)
+                logger.info("Saved new best checkpoint to {}".format(best_path))
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     all_end_time = time.monotonic()
     total_time = timedelta(seconds=all_end_time - all_start_time)
-    logger.info('Total PromptSG running time: {}'.format(total_time))
-    logger.info('Best mAP: {:.1%}, Best Rank-1: {:.1%}'.format(best_mAP, best_rank1))
+    logger.info("Total PromptSG running time: {}".format(total_time))
+    logger.info("Best mAP: {:.1%}, Best Rank-1: {:.1%}".format(best_mAP, best_rank1))
 
 
 def do_inference_promptsg(
@@ -202,25 +219,28 @@ def do_inference_promptsg(
     model,
     val_loader,
     num_query,
-    prompt_mode='simplified',
-    logger_name='transreid.test',
+    prompt_mode="simplified",
+    logger_name="transreid.test",
     save_result=True,
 ):
-    device = 'cuda'
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger = logging.getLogger(logger_name)
-    logger.info('Enter PromptSG inferencing with prompt_mode={}'.format(prompt_mode))
+    logger.info("Enter PromptSG inferencing with prompt_mode={}".format(prompt_mode))
 
     evaluator = R1_mAP_eval(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
     evaluator.reset()
 
-    if device:
-        if torch.cuda.device_count() > 1 and not hasattr(model, 'module'):
-            print('Using {} GPUs for inference'.format(torch.cuda.device_count()))
-            model = nn.DataParallel(model)
-        model.to(device)
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1 and not hasattr(model, "module"):
+        print("Using {} GPUs for inference".format(torch.cuda.device_count()))
+        model = nn.DataParallel(model)
+
+    model.to(device)
 
     base_model = _unwrap_model(model)
     base_model.set_inference_prompt_mode(prompt_mode)
+
+    use_sie_camera = getattr(cfg.MODEL, "SIE_CAMERA", False)
+    use_sie_view = getattr(cfg.MODEL, "SIE_VIEW", False)
 
     model.eval()
     img_path_list = []
@@ -228,11 +248,13 @@ def do_inference_promptsg(
     for n_iter, (img, pid, camid, camids, target_view, imgpath) in enumerate(val_loader):
         with torch.no_grad():
             img = img.to(device)
-            if cfg.MODEL.SIE_CAMERA:
+
+            if use_sie_camera:
                 camids = camids.to(device)
             else:
                 camids = None
-            if cfg.MODEL.SIE_VIEW:
+
+            if use_sie_view:
                 target_view = target_view.to(device)
             else:
                 target_view = None
@@ -242,9 +264,9 @@ def do_inference_promptsg(
             img_path_list.extend(imgpath)
 
     cmc, mAP, _, _, _, _, _ = evaluator.compute()
-    logger.info('Validation Results')
-    logger.info('mAP: {:.1%}'.format(mAP))
+    logger.info("Validation Results")
+    logger.info("mAP: {:.1%}".format(mAP))
     for r in [1, 5, 10]:
-        logger.info('CMC curve, Rank-{:<3}:{:.1%}'.format(r, cmc[r - 1]))
+        logger.info("CMC curve, Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
 
     return cmc[0], cmc[4], mAP

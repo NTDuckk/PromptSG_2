@@ -47,13 +47,12 @@ def set_seed(seed):
 
 
 def build_optimizer(cfg, model, visual_lr=None, new_module_lr=None):
-    weight_decay = cfg.SOLVER.STAGE2.WEIGHT_DECAY
+    weight_decay = cfg.SOLVER.WEIGHT_DECAY
 
     if visual_lr is None:
-        visual_lr = cfg.SOLVER.STAGE2.BASE_LR
+        visual_lr = cfg.SOLVER.VISUAL_BASE_LR
     if new_module_lr is None:
-        # Reuse STAGE1.BASE_LR as the higher lr for new PromptSG modules.
-        new_module_lr = cfg.SOLVER.STAGE1.BASE_LR
+        new_module_lr = cfg.SOLVER.NEW_MODULE_BASE_LR
 
     param_groups = model.get_param_groups(
         visual_lr=visual_lr,
@@ -123,13 +122,13 @@ def main():
         new_module_lr=args.new_module_lr,
     )
 
-    warmup_epochs = getattr(cfg.SOLVER.STAGE1, 'WARMUP_EPOCHS', 0)
+    warmup_epochs = cfg.SOLVER.WARMUP_EPOCHS
     scheduler = WarmupMultiStepLR(
         optimizer,
-        milestones=list(cfg.SOLVER.STAGE2.STEPS),
-        gamma=cfg.SOLVER.STAGE2.GAMMA,
+        milestones=list(cfg.SOLVER.STEPS),
+        gamma=cfg.SOLVER.GAMMA,
         warmup_epochs=warmup_epochs,
-        warmup_factor=getattr(cfg.SOLVER.STAGE2, 'WARMUP_FACTOR', 0.1),
+        warmup_factor=cfg.SOLVER.WARMUP_FACTOR,
     )
 
     do_train_promptsg(
