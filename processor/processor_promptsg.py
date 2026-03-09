@@ -245,6 +245,7 @@ def do_inference_promptsg(
     model.eval()
     img_path_list = []
 
+    processed = 0
     for n_iter, (img, pid, camid, camids, target_view, imgpath) in enumerate(val_loader):
         with torch.no_grad():
             img = img.to(device)
@@ -259,9 +260,55 @@ def do_inference_promptsg(
             else:
                 target_view = None
 
-            feat = model(x=img, cam_label=camids, view_label=target_view, prompt_mode=prompt_mode)
-            evaluator.update((feat, pid, camid))
+            batch_size = img.shape[0]
+            start_idx = processed
+            end_idx = processed + batch_size
+
+            # Case 1: entire batch is query
+            if end_idx <= num_query:
+                feat = model(x=img, cam_label=camids, view_label=target_view, prompt_mode=prompt_mode)
+                evaluator.update((feat, pid, camid))
+
+            # Case 2: entire batch is gallery -> use image encoder only
+            elif start_idx >= num_query:
+                visual = base_model.encode_visual_tokens(img, cam_label=camids, view_label=target_view)
+                vis_global = visual['global_proj']
+                fused_bn = base_model.bottleneck(vis_global)
+                if base_model.neck_feat == 'after':
+                    feat = fused_bn
+                else:
+                    feat = vis_global
+                evaluator.update((feat, pid, camid))
+
+            # Case 3: batch spans query -> gallery boundary: split and process separately
+            else:
+                q_num = num_query - start_idx
+                # queries through full model
+                q_img = img[:q_num]
+                q_pid = pid[:q_num]
+                q_cam = camid[:q_num]
+                q_camids = camids[:q_num] if camids is not None else None
+                q_target_view = target_view[:q_num] if target_view is not None else None
+                q_feat = model(x=q_img, cam_label=q_camids, view_label=q_target_view, prompt_mode=prompt_mode)
+                evaluator.update((q_feat, q_pid, q_cam))
+
+                # remaining are gallery -> image encoder only
+                g_img = img[q_num:]
+                g_pid = pid[q_num:]
+                g_cam = camid[q_num:]
+                g_camids = camids[q_num:] if camids is not None else None
+                g_target_view = target_view[q_num:] if target_view is not None else None
+                visual = base_model.encode_visual_tokens(g_img, cam_label=g_camids, view_label=g_target_view)
+                vis_global = visual['global_proj']
+                fused_bn = base_model.bottleneck(vis_global)
+                if base_model.neck_feat == 'after':
+                    g_feat = fused_bn
+                else:
+                    g_feat = vis_global
+                evaluator.update((g_feat, g_pid, g_cam))
+
             img_path_list.extend(imgpath)
+            processed += batch_size
 
     cmc, mAP, _, _, _, _, _ = evaluator.compute()
     logger.info("Validation Results")
