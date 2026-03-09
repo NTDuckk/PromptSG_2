@@ -3,16 +3,17 @@ import os
 import time
 from datetime import timedelta
 
+import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.cuda import amp
-import numpy as np
 
 from loss.softmax_loss import CrossEntropyLabelSmooth
 from loss.supcontrast import SupConLoss
 from loss.triplet_loss import TripletLoss
 from utils.meter import AverageMeter
-from utils.metrics import R1_mAP_eval
+from utils.metrics import compute_reid_metrics, format_reid_result
 
 
 def _unwrap_model(model):
@@ -38,8 +39,8 @@ def _compute_promptsg_loss(outputs, pids, id_criterion, triplet, supcon, cfg):
     for feat in outputs["triplet_feats"]:
         tri_loss = tri_loss + triplet(feat, pids)[0]
 
-    image_feat = torch.nn.functional.normalize(outputs["global_image"], dim=1)
-    text_feat = torch.nn.functional.normalize(outputs["text_feat"], dim=1)
+    image_feat = F.normalize(outputs["global_image"], dim=1)
+    text_feat = F.normalize(outputs["text_feat"], dim=1)
     sup_loss = supcon(text_feat, image_feat, pids, pids) + supcon(image_feat, text_feat, pids, pids)
 
     id_w = getattr(cfg.MODEL, "ID_LOSS_WEIGHT", 1.0)
@@ -89,7 +90,6 @@ def do_train_promptsg(
     sup_meter = AverageMeter()
     acc_meter = AverageMeter()
 
-    evaluator = R1_mAP_eval(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
     scaler = amp.GradScaler(enabled=torch.cuda.is_available())
     id_criterion, triplet, supcon = _build_losses(cfg, num_classes, device)
 
@@ -107,7 +107,6 @@ def do_train_promptsg(
         tri_meter.reset()
         sup_meter.reset()
         acc_meter.reset()
-        evaluator.reset()
 
         model.train()
         for n_iter, (img, vid, target_cam, target_view) in enumerate(train_loader):
@@ -194,7 +193,7 @@ def do_train_promptsg(
                 save_result=False,
             )
             logger.info(
-                "Validation Results - Epoch: {} | prompt_mode={} | mAP: {:.1%} | "
+                "Validation Results - Epoch: {} | prompt_mode={} | primary(text->image_cls) mAP: {:.1%} | "
                 "Rank-1: {:.1%} | Rank-5: {:.1%}".format(
                     epoch, eval_prompt_mode, mAP, rank1, rank5
                 )
@@ -228,9 +227,6 @@ def do_inference_promptsg(
     logger = logging.getLogger(logger_name)
     logger.info("Enter PromptSG inferencing with prompt_mode={}".format(prompt_mode))
 
-    evaluator = R1_mAP_eval(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
-    evaluator.reset()
-
     if torch.cuda.is_available() and torch.cuda.device_count() > 1 and not hasattr(model, "module"):
         print("Using {} GPUs for inference".format(torch.cuda.device_count()))
         model = nn.DataParallel(model)
@@ -244,7 +240,31 @@ def do_inference_promptsg(
     use_sie_view = getattr(cfg.MODEL, "SIE_VIEW", False)
 
     model.eval()
-    img_path_list = []
+
+    q_text_feats, q_img_feats = [], []
+    g_img_feats, g_cross_feats = [], []
+    q_pids, q_camids = [], []
+    g_pids, g_camids = [], []
+
+    def _extract_modal_feats(img_batch, cam_batch=None, view_batch=None):
+        visual = base_model.encode_visual_tokens(img_batch, cam_label=cam_batch, view_label=view_batch)
+        img_feat = F.normalize(visual["global_proj"].float(), dim=1)
+
+        if prompt_mode == "composed":
+            text_feat, _ = base_model.encode_text_from_image(visual["global_proj"])
+        elif prompt_mode == "simplified":
+            text_feat = base_model.encode_text_simplified(img_batch.shape[0], img_batch.device)
+        else:
+            raise ValueError(f"Unsupported prompt mode: {prompt_mode}")
+
+        text_feat = F.normalize(text_feat.float(), dim=1)
+        cross_x = base_model.cross_former(
+            text_feat.unsqueeze(1),
+            visual["visual_tokens"],
+            visual["visual_tokens"],
+        )
+        cross_feat = F.normalize(cross_x.squeeze(1).float(), dim=1)
+        return text_feat, img_feat, cross_feat
 
     processed = 0
     for n_iter, (img, pid, camid, camids, target_view, imgpath) in enumerate(val_loader):
@@ -265,74 +285,100 @@ def do_inference_promptsg(
             start_idx = processed
             end_idx = processed + batch_size
 
-            # Case 1: entire batch is query
             if end_idx <= num_query:
-                feat = model(x=img, cam_label=camids, view_label=target_view, prompt_mode=prompt_mode)
-                evaluator.update((feat, pid, camid))
+                q_text, q_img, _ = _extract_modal_feats(img, cam_batch=camids, view_batch=target_view)
+                q_text_feats.append(q_text.cpu())
+                q_img_feats.append(q_img.cpu())
+                q_pids.extend(np.asarray(pid))
+                q_camids.extend(np.asarray(camid))
 
-            # Case 2: entire batch is gallery -> use image encoder only
             elif start_idx >= num_query:
-                visual = base_model.encode_visual_tokens(img, cam_label=camids, view_label=target_view)
-                vis_global = visual['global_proj']
-                fused_bn = base_model.bottleneck(vis_global)
-                if base_model.neck_feat == 'after':
-                    feat = fused_bn
-                else:
-                    feat = vis_global
-                evaluator.update((feat, pid, camid))
+                _, g_img, g_cross = _extract_modal_feats(img, cam_batch=camids, view_batch=target_view)
+                g_img_feats.append(g_img.cpu())
+                g_cross_feats.append(g_cross.cpu())
+                g_pids.extend(np.asarray(pid))
+                g_camids.extend(np.asarray(camid))
 
-            # Case 3: batch spans query -> gallery boundary: split and process separately
             else:
                 q_num = num_query - start_idx
-                # queries through full model
-                q_img = img[:q_num]
-                q_pid = pid[:q_num]
-                q_cam = camid[:q_num]
-                q_camids = camids[:q_num] if camids is not None else None
-                q_target_view = target_view[:q_num] if target_view is not None else None
-                q_feat = model(x=q_img, cam_label=q_camids, view_label=q_target_view, prompt_mode=prompt_mode)
-                evaluator.update((q_feat, q_pid, q_cam))
 
-                # remaining are gallery -> image encoder only
-                g_img = img[q_num:]
-                g_pid = pid[q_num:]
-                g_cam = camid[q_num:]
-                g_camids = camids[q_num:] if camids is not None else None
-                g_target_view = target_view[q_num:] if target_view is not None else None
-                visual = base_model.encode_visual_tokens(g_img, cam_label=g_camids, view_label=g_target_view)
-                vis_global = visual['global_proj']
-                fused_bn = base_model.bottleneck(vis_global)
-                if base_model.neck_feat == 'after':
-                    g_feat = fused_bn
-                else:
-                    g_feat = vis_global
-                evaluator.update((g_feat, g_pid, g_cam))
+                q_img_batch = img[:q_num]
+                q_pid_batch = pid[:q_num]
+                q_cam_batch = camid[:q_num]
+                q_camids_batch = camids[:q_num] if camids is not None else None
+                q_view_batch = target_view[:q_num] if target_view is not None else None
+                q_text, q_img, _ = _extract_modal_feats(q_img_batch, cam_batch=q_camids_batch, view_batch=q_view_batch)
+                q_text_feats.append(q_text.cpu())
+                q_img_feats.append(q_img.cpu())
+                q_pids.extend(np.asarray(q_pid_batch))
+                q_camids.extend(np.asarray(q_cam_batch))
 
-            img_path_list.extend(imgpath)
+                g_img_batch = img[q_num:]
+                g_pid_batch = pid[q_num:]
+                g_cam_batch = camid[q_num:]
+                g_camids_batch = camids[q_num:] if camids is not None else None
+                g_view_batch = target_view[q_num:] if target_view is not None else None
+                _, g_img, g_cross = _extract_modal_feats(g_img_batch, cam_batch=g_camids_batch, view_batch=g_view_batch)
+                g_img_feats.append(g_img.cpu())
+                g_cross_feats.append(g_cross.cpu())
+                g_pids.extend(np.asarray(g_pid_batch))
+                g_camids.extend(np.asarray(g_cam_batch))
+
             processed += batch_size
 
-    cmc, mAP, distmat, pids, camids, qf, gf = evaluator.compute()
+    q_text_feats = torch.cat(q_text_feats, dim=0)
+    q_img_feats = torch.cat(q_img_feats, dim=0)
+    g_img_feats = torch.cat(g_img_feats, dim=0)
+    g_cross_feats = torch.cat(g_cross_feats, dim=0)
+
+    q_pids = np.asarray(q_pids)
+    q_camids = np.asarray(q_camids)
+    g_pids = np.asarray(g_pids)
+    g_camids = np.asarray(g_camids)
+
+    metric_name = getattr(cfg.TEST, "DIST_METRIC", "cosine")
+
+    results = {
+        "text_to_image_cls": compute_reid_metrics(
+            q_text_feats, g_img_feats, q_pids, g_pids, q_camids, g_camids,
+            max_rank=50, metric=metric_name, normalize=False,
+        ),
+        "image_to_image": compute_reid_metrics(
+            q_img_feats, g_img_feats, q_pids, g_pids, q_camids, g_camids,
+            max_rank=50, metric=metric_name, normalize=False,
+        ),
+        "text_to_cross": compute_reid_metrics(
+            q_text_feats, g_cross_feats, q_pids, g_pids, q_camids, g_camids,
+            max_rank=50, metric=metric_name, normalize=False,
+        ),
+    }
+
     logger.info("Validation Results")
-    logger.info("mAP: {:.1%}".format(mAP))
-    for r in [1, 5, 10]:
-        logger.info("CMC curve, Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
+    logger.info(format_reid_result("text->image_cls", results["text_to_image_cls"]))
+    logger.info(format_reid_result("image->image", results["image_to_image"]))
+    logger.info(format_reid_result("text->cross", results["text_to_cross"]))
 
-    # Debug: log feature shapes and norms to verify q/g feature compatibility
     try:
-        logger.info("qf shape: {} | gf shape: {}".format(getattr(qf, 'shape', None), getattr(gf, 'shape', None)))
-        if isinstance(qf, torch.Tensor):
-            qf_norm_mean = float(qf.norm(dim=1).mean())
-            gf_norm_mean = float(gf.norm(dim=1).mean())
-            logger.info("qf mean norm: {:.4f} | gf mean norm: {:.4f}".format(qf_norm_mean, gf_norm_mean))
-        # distance matrix stats
-        if distmat is not None:
-            dist_flat = distmat.flatten()
-            logger.info(
-                "distmat stats — min: {:.4f}, med: {:.4f}, mean: {:.4f}, max: {:.4f}".format(
-                    float(np.min(dist_flat)), float(np.median(dist_flat)), float(np.mean(dist_flat)), float(np.max(dist_flat))
-                )
+        logger.info(
+            "feature shapes | q_text: {} q_img: {} g_img: {} g_cross: {}".format(
+                tuple(q_text_feats.shape), tuple(q_img_feats.shape), tuple(g_img_feats.shape), tuple(g_cross_feats.shape)
             )
+        )
+        logger.info(
+            "mean norms | q_text: {:.4f} q_img: {:.4f} g_img: {:.4f} g_cross: {:.4f}".format(
+                float(q_text_feats.norm(dim=1).mean()),
+                float(q_img_feats.norm(dim=1).mean()),
+                float(g_img_feats.norm(dim=1).mean()),
+                float(g_cross_feats.norm(dim=1).mean()),
+            )
+        )
     except Exception:
-        logger.exception("Error while logging debug infos for features")
+        logger.exception("Error while logging PromptSG multi-branch debug info")
 
-    return cmc[0], cmc[4], mAP
+    primary_pair = getattr(cfg.TEST, "PRIMARY_EVAL_PAIR", "text_to_image_cls")
+    if primary_pair not in results:
+        logger.warning("Unknown PRIMARY_EVAL_PAIR=%s. Falling back to text_to_image_cls", primary_pair)
+        primary_pair = "text_to_image_cls"
+
+    primary = results[primary_pair]
+    return primary["cmc"][0], primary["cmc"][4], primary["mAP"]
