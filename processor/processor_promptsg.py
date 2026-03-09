@@ -6,6 +6,7 @@ from datetime import timedelta
 import torch
 import torch.nn as nn
 from torch.cuda import amp
+import numpy as np
 
 from loss.softmax_loss import CrossEntropyLabelSmooth
 from loss.supcontrast import SupConLoss
@@ -310,10 +311,28 @@ def do_inference_promptsg(
             img_path_list.extend(imgpath)
             processed += batch_size
 
-    cmc, mAP, _, _, _, _, _ = evaluator.compute()
+    cmc, mAP, distmat, pids, camids, qf, gf = evaluator.compute()
     logger.info("Validation Results")
     logger.info("mAP: {:.1%}".format(mAP))
     for r in [1, 5, 10]:
         logger.info("CMC curve, Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
+
+    # Debug: log feature shapes and norms to verify q/g feature compatibility
+    try:
+        logger.info("qf shape: {} | gf shape: {}".format(getattr(qf, 'shape', None), getattr(gf, 'shape', None)))
+        if isinstance(qf, torch.Tensor):
+            qf_norm_mean = float(qf.norm(dim=1).mean())
+            gf_norm_mean = float(gf.norm(dim=1).mean())
+            logger.info("qf mean norm: {:.4f} | gf mean norm: {:.4f}".format(qf_norm_mean, gf_norm_mean))
+        # distance matrix stats
+        if distmat is not None:
+            dist_flat = distmat.flatten()
+            logger.info(
+                "distmat stats — min: {:.4f}, med: {:.4f}, mean: {:.4f}, max: {:.4f}".format(
+                    float(np.min(dist_flat)), float(np.median(dist_flat)), float(np.mean(dist_flat)), float(np.max(dist_flat))
+                )
+            )
+    except Exception:
+        logger.exception("Error while logging debug infos for features")
 
     return cmc[0], cmc[4], mAP
