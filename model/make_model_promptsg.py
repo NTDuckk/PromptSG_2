@@ -1,3 +1,4 @@
+
 import os
 import torch
 import torch.nn as nn
@@ -42,22 +43,23 @@ class TextEncoder(nn.Module):
         self.dtype = clip_model.dtype
 
     def forward(self, prompts, tokenized_prompts):
+        # ipdb.set_trace()
         x = prompts + self.positional_embedding.type(self.dtype)
         x = x.permute(1, 0, 2)  # NLD -> LND
-        x = self.transformer(x)
-        x = x.permute(1, 0, 2)  # LND -> NLD
+
+        outputs = self.transformer([x])
+        x = outputs[0]
+        att = outputs[1]
+        x = x.permute(1, 0, 2)  # LND -> NLD   # x,att
         x = self.ln_final(x).type(self.dtype)
-        text_feature = x[torch.arange(x.shape[0], device=x.device), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
+
+        # x.shape = [batch_size, n_ctx, transformer.width]
+        # take features from the eot embedding (eot_token is the highest number in each sequence)
+        text_feature = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
         return text_feature
 
 
 class IM2TEXT(nn.Module):
-    """
-    Reuse the inversion-network style MLP that already exists in your codebase.
-    Input: global projected image embedding (512)
-    Output: one pseudo token s* in the CLIP token space (512)
-    """
-
     def __init__(self, embed_dim=512, middle_dim=512, output_dim=512, n_layer=2, dropout=0.1):
         super().__init__()
         self.fc_out = nn.Linear(middle_dim, output_dim)
@@ -79,53 +81,44 @@ class IM2TEXT(nn.Module):
 
 
 class PromptComposer(nn.Module):
-    """
-    Compose PromptSG prompt:
-      composed   : "A photo of a X person." / vehicle
-      simplified : "A photo of a person." / vehicle
-    Here X is replaced by the pseudo-token s* generated from the image.
-    """
-
     def __init__(self, dataset_name, dtype, token_embedding):
         super().__init__()
-        if dataset_name in ['VehicleID', 'veri']:
-            composed_template = 'A photo of a X vehicle.'
+        names = dataset_name if isinstance(dataset_name, (list, tuple)) else [dataset_name]
+        if any(name in ['VehicleID', 'veri'] for name in names):
+            ctx_init = 'A photo of a X vehicle.'
             simplified_template = 'A photo of a vehicle.'
         else:
-            composed_template = 'A photo of a X person.'
+            ctx_init = 'A photo of a X person.'
             simplified_template = 'A photo of a person.'
 
         self.dtype = dtype
-
-        tokenized_composed = clip.tokenize(composed_template)
+        n_ctx = 4
+        tokenized_prompts = clip.tokenize(ctx_init)
         tokenized_simplified = clip.tokenize(simplified_template)
-
-        # Ensure token index tensors are on the same device as the token embedding
-        # to avoid CPU/CUDA device mismatch when calling the embedding module.
         device = token_embedding.weight.device
-        tokenized_composed = tokenized_composed.to(device)
+        tokenized_prompts = tokenized_prompts.to(device)
         tokenized_simplified = tokenized_simplified.to(device)
 
         with torch.no_grad():
-            composed_embedding = token_embedding(tokenized_composed).type(dtype)
+            embedding = token_embedding(tokenized_prompts).type(dtype)
             simplified_embedding = token_embedding(tokenized_simplified).type(dtype)
 
-        # For "A photo of a X person." the placeholder token is after the first 5 embeddings.
-        self.register_buffer('tokenized_composed', tokenized_composed)
+        self.register_buffer('tokenized_prompts', tokenized_prompts)
         self.register_buffer('tokenized_simplified', tokenized_simplified)
-        self.register_buffer('token_prefix', composed_embedding[:, :5, :])
-        self.register_buffer('token_suffix', composed_embedding[:, 6:, :])
+        self.register_buffer('token_prefix', embedding[:, :n_ctx + 1, :])
+        self.register_buffer('token_suffix', embedding[:, n_ctx + 2:, :])
         self.register_buffer('simplified_prompts', simplified_embedding)
 
-    def compose(self, pseudo_token: torch.Tensor):
-        b = pseudo_token.shape[0]
+    def forward(self, bias: torch.Tensor):
+        b = bias.shape[0]
         prefix = self.token_prefix.expand(b, -1, -1)
         suffix = self.token_suffix.expand(b, -1, -1)
-        prompts = torch.cat([prefix, pseudo_token.unsqueeze(1), suffix], dim=1)
+        bias = bias.unsqueeze(1)
+        prompts = torch.cat([prefix, bias, suffix], dim=1)
         return prompts
 
     def get_composed_tokens(self, batch_size, device):
-        return self.tokenized_composed.to(device).expand(batch_size, -1)
+        return self.tokenized_prompts.to(device).expand(batch_size, -1)
 
     def get_simplified_prompts(self, batch_size, device):
         return self.simplified_prompts.to(device).expand(batch_size, -1, -1)
@@ -158,11 +151,11 @@ class PromptSGReID(nn.Module):
         self.w_resolution = int((cfg.INPUT.SIZE_TRAIN[1] - 16) // cfg.MODEL.STRIDE_SIZE[1] + 1)
         self.vision_stride_size = cfg.MODEL.STRIDE_SIZE[0]
 
-        clip_model = load_clip_to_cpu(cfg, self.model_name, self.h_resolution, self.w_resolution, self.vision_stride_size)
-        clip_model.to('cuda')
+        self.base_model = load_clip_to_cpu(cfg, self.model_name, self.h_resolution, self.w_resolution, self.vision_stride_size)
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.base_model.to(device)
 
-        self.image_encoder = clip_model.visual
-        self.text_encoder = TextEncoder(clip_model)
+        self.text_encoder = TextEncoder(self.base_model)
         for param in self.text_encoder.parameters():
             param.requires_grad = False
 
@@ -178,7 +171,6 @@ class PromptSGReID(nn.Module):
         else:
             self.cv_embed = None
 
-        # Reuse the user's requested inversion-network block.
         self.img2text = IM2TEXT(
             embed_dim=self.in_planes_proj,
             middle_dim=self.in_planes_proj,
@@ -187,7 +179,6 @@ class PromptSGReID(nn.Module):
             dropout=0.1,
         )
 
-        # Reuse the user's requested cross-attention stack.
         self.cross_attn = nn.MultiheadAttention(
             self.in_planes_proj,
             self.in_planes_proj // 64,
@@ -214,7 +205,7 @@ class PromptSGReID(nn.Module):
             nn.init.normal_(block.mlp.c_fc.weight, std=fc_std)
             nn.init.normal_(block.mlp.c_proj.weight, std=proj_std)
 
-        self.prompt_composer = PromptComposer(cfg.DATASETS.NAMES, clip_model.dtype, clip_model.token_embedding)
+        self.prompt_composer = PromptComposer(cfg.DATASETS.NAMES, self.base_model.dtype, self.base_model.token_embedding)
 
         self.classifier = nn.Linear(self.in_planes_proj, self.num_classes, bias=False)
         self.classifier.apply(weights_init_classifier)
@@ -228,29 +219,19 @@ class PromptSGReID(nn.Module):
             raise ValueError(f'Unsupported inference prompt mode: {mode}')
         self.inference_prompt_mode = mode
 
-    def _get_cv_embed(self, cam_label=None, view_label=None):
-        if self.cv_embed is None:
-            return None
-        if cam_label is not None and view_label is not None and self.camera_num > 0 and self.view_num > 0:
-            return self.sie_coe * self.cv_embed[cam_label * self.view_num + view_label]
-        if cam_label is not None and self.camera_num > 0:
-            return self.sie_coe * self.cv_embed[cam_label]
-        if view_label is not None and self.view_num > 0:
-            return self.sie_coe * self.cv_embed[view_label]
-        return None
-
     def encode_visual_tokens(self, x, cam_label=None, view_label=None):
-        cv_embed = self._get_cv_embed(cam_label=cam_label, view_label=view_label)
-        x11, x12, xproj = self.image_encoder(x, cv_embed)
+        visual_out = self.base_model(x)
+        if isinstance(visual_out, (tuple, list)):
+            visual_tokens = visual_out[0]
+        else:
+            visual_tokens = visual_out
 
-        if self.model_name == 'RN50':
-            raise NotImplementedError('RN50 PromptSG path is not implemented in this patch.')
+        if visual_tokens.dim() == 2:
+            visual_tokens = visual_tokens.unsqueeze(1)
 
         return {
-            'visual_tokens': xproj.float(),
-            'cls_x11': x11[:, 0, :].float(),
-            'cls_x12': x12[:, 0, :].float(),
-            'global_proj': xproj[:, 0, :].float(),
+            'visual_tokens': visual_tokens.float(),
+            'global_proj': visual_tokens[:, 0, :].float(),
         }
 
     def cross_former(self, q, k, v):
@@ -260,19 +241,21 @@ class PromptSGReID(nn.Module):
             self.ln_pre_i(v),
             need_weights=False,
         )[0]
-        x = x.permute(1, 0, 2)  # NLD -> LND
+        x = x.permute(1, 0, 2)
         x = self.cross_modal_transformer(x)
+        if isinstance(x, (list, tuple)):
+            x = x[0]
         x = x[0].unsqueeze(0)
-        x = x.permute(1, 0, 2)  # LND -> NLD
+        x = x.permute(1, 0, 2)
         x = self.ln_post(x)
         return x
 
     def encode_text_from_image(self, global_proj):
-        pseudo_token = self.img2text(global_proj)
-        prompts = self.prompt_composer.compose(pseudo_token.to(self.prompt_composer.dtype))
+        pseudo_prompt = self.img2text(global_proj)
+        prompts = self.prompt_composer(pseudo_prompt.to(self.prompt_composer.dtype))
         tokenized = self.prompt_composer.get_composed_tokens(prompts.shape[0], prompts.device)
         text_feature = self.text_encoder(prompts, tokenized)
-        return text_feature.float(), pseudo_token.float()
+        return text_feature.float(), pseudo_prompt.float()
 
     def encode_text_simplified(self, batch_size, device):
         prompts = self.prompt_composer.get_simplified_prompts(batch_size, device).type(self.prompt_composer.dtype)
@@ -282,7 +265,7 @@ class PromptSGReID(nn.Module):
 
     def forward_train(self, x, pids=None, cam_label=None, view_label=None):
         visual = self.encode_visual_tokens(x, cam_label=cam_label, view_label=view_label)
-        text_feature, pseudo_token = self.encode_text_from_image(visual['global_proj'])
+        text_feature, pseudo_prompt = self.encode_text_from_image(visual['global_proj'])
         cross_x = self.cross_former(text_feature.unsqueeze(1), visual['visual_tokens'], visual['visual_tokens'])
         fused = cross_x.squeeze(1)
         fused_bn = self.bottleneck(fused)
@@ -290,12 +273,13 @@ class PromptSGReID(nn.Module):
 
         return {
             'cls_score': cls_score,
-            'triplet_feats': [visual['cls_x11'], visual['cls_x12'], fused],
+            'triplet_feat': fused,
+            'triplet_feats': [fused],
             'global_image': visual['global_proj'],
             'text_feat': text_feature,
             'fused_feat': fused,
             'fused_bn': fused_bn,
-            'pseudo_token': pseudo_token,
+            'pseudo_prompt': pseudo_prompt,
         }
 
     def forward_infer(self, x, cam_label=None, view_label=None, prompt_mode: Optional[str] = None):
@@ -325,10 +309,9 @@ class PromptSGReID(nn.Module):
     def get_param_groups(self, visual_lr, new_lr, weight_decay):
         visual_params = []
         new_params = []
-        frozen = set(id(p) for p in self.text_encoder.parameters())
 
-        for p in self.image_encoder.parameters():
-            if p.requires_grad and id(p) not in frozen:
+        for p in self.base_model.parameters():
+            if p.requires_grad:
                 visual_params.append(p)
 
         for module in [self.img2text, self.cross_attn, self.cross_modal_transformer, self.classifier, self.bottleneck]:
@@ -344,9 +327,12 @@ class PromptSGReID(nn.Module):
         if isinstance(self.cv_embed, nn.Parameter) and self.cv_embed.requires_grad:
             new_params.append(self.cv_embed)
 
+        visual_param_ids = {id(p) for p in visual_params}
+        dedup_new = [p for p in new_params if id(p) not in visual_param_ids]
+
         return [
             {'params': visual_params, 'lr': visual_lr, 'weight_decay': weight_decay},
-            {'params': new_params, 'lr': new_lr, 'weight_decay': weight_decay},
+            {'params': dedup_new, 'lr': new_lr, 'weight_decay': weight_decay},
         ]
 
     def load_param(self, trained_path):
@@ -360,42 +346,15 @@ class PromptSGReID(nn.Module):
         print('Loading pretrained model from {}'.format(trained_path))
 
 
-from .clip import clip as _clip_module
-
-
 def load_clip_to_cpu(cfg, backbone_name, h_resolution, w_resolution, vision_stride_size):
-    # 1) prefer explicit local path from config
-    model_path = getattr(cfg.MODEL, "PRETRAIN_PATH", "")
-    if model_path is None:
-        model_path = ""
-
-    # 2) if not provided, try existing CLIP cache directly
-    if model_path == "":
-        cache_path = os.path.expanduser("~/.cache/clip/{}.pt".format(backbone_name))
-        if os.path.isfile(cache_path):
-            model_path = cache_path
-
-    # 3) only download when no local/cache file is available
-    if model_path == "":
-        url = clip._MODELS[backbone_name]
-        model_path = clip._download(url)
-
-    print("Loading CLIP backbone from {}".format(model_path))
-
-    try:
-        # loading JIT archive
-        model = torch.jit.load(model_path, map_location="cpu").eval()
-        state_dict = None
-    except RuntimeError:
-        state_dict = torch.load(model_path, map_location="cpu")
-
-    model = clip.build_model(
-        state_dict or model.state_dict(),
-        h_resolution,
-        w_resolution,
-        vision_stride_size
+    model_name_or_path = getattr(cfg.MODEL, 'PRETRAIN_PATH', '') or backbone_name
+    image_size = tuple(cfg.INPUT.SIZE_TRAIN)
+    model, model_cfg = clip.build_CLIP_from_openai_pretrained(
+        model_name_or_path,
+        image_size=image_size,
+        stride_size=vision_stride_size,
     )
-
+    print('Loading CLIP backbone from {}'.format(model_cfg['model_path']))
     return model
 
 
