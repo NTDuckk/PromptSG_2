@@ -63,6 +63,7 @@ class IM2TEXT(nn.Module):
     def __init__(self, embed_dim=512, middle_dim=512, output_dim=512, n_layer=2, dropout=0.1):
         super().__init__()
         self.fc_out = nn.Linear(middle_dim, output_dim)
+        self.bn = nn.BatchNorm1d(output_dim)
         layers = []
         dim = embed_dim
         for _ in range(n_layer):
@@ -77,23 +78,18 @@ class IM2TEXT(nn.Module):
     def forward(self, x: torch.Tensor):
         for layer in self.layers:
             x = layer(x)
-        return self.fc_out(x)
+        return self.bn(self.fc_out(x))
 
 
 class PromptComposer(nn.Module):
-    def __init__(self, dataset_name, dtype, token_embedding):
+    def __init__(self, composed_template, simplified_template, dtype, token_embedding):
         super().__init__()
-        names = dataset_name if isinstance(dataset_name, (list, tuple)) else [dataset_name]
-        if any(name in ['VehicleID', 'veri'] for name in names):
-            ctx_init = 'A photo of a X vehicle.'
-            simplified_template = 'A photo of a vehicle.'
-        else:
-            ctx_init = 'A photo of a X person.'
-            simplified_template = 'A photo of a person.'
-
         self.dtype = dtype
-        n_ctx = 4
-        tokenized_prompts = clip.tokenize(ctx_init)
+        # Calculate n_ctx from the position of placeholder 'X' in the template
+        words = composed_template.split()
+        n_ctx = words.index('X')
+
+        tokenized_prompts = clip.tokenize(composed_template)
         tokenized_simplified = clip.tokenize(simplified_template)
         device = token_embedding.weight.device
         tokenized_prompts = tokenized_prompts.to(device)
@@ -175,8 +171,8 @@ class PromptSGReID(nn.Module):
             embed_dim=self.in_planes_proj,
             middle_dim=self.in_planes_proj,
             output_dim=self.in_planes_proj,
-            n_layer=2,
-            dropout=0.1,
+            n_layer=cfg.MODEL.PROMPTSG.INVERSION_LAYERS,
+            dropout=cfg.MODEL.PROMPTSG.INVERSION_DROPOUT,
         )
 
         self.cross_attn = nn.MultiheadAttention(
@@ -186,7 +182,7 @@ class PromptSGReID(nn.Module):
         )
         self.cross_modal_transformer = Transformer(
             width=self.in_planes_proj,
-            layers=2,
+            layers=cfg.MODEL.PROMPTSG.CMT_DEPTH,
             heads=self.in_planes_proj // 64,
         )
         self.ln_pre_t = LayerNorm(self.in_planes_proj)
@@ -205,7 +201,12 @@ class PromptSGReID(nn.Module):
             nn.init.normal_(block.mlp.c_fc.weight, std=fc_std)
             nn.init.normal_(block.mlp.c_proj.weight, std=proj_std)
 
-        self.prompt_composer = PromptComposer(cfg.DATASETS.NAMES, self.base_model.dtype, self.base_model.token_embedding)
+        self.prompt_composer = PromptComposer(
+            cfg.MODEL.PROMPTSG.COMPOSED_TEMPLATE,
+            cfg.MODEL.PROMPTSG.SIMPLE_TEMPLATE,
+            self.base_model.dtype,
+            self.base_model.token_embedding,
+        )
 
         self.classifier = nn.Linear(self.in_planes_proj, self.num_classes, bias=False)
         self.classifier.apply(weights_init_classifier)
@@ -223,8 +224,10 @@ class PromptSGReID(nn.Module):
         visual_out = self.base_model(x)
         if isinstance(visual_out, (tuple, list)):
             visual_tokens = visual_out[0]
+            intermediate_hidden = visual_out[2] if len(visual_out) > 2 else []
         else:
             visual_tokens = visual_out
+            intermediate_hidden = []
 
         if visual_tokens.dim() == 2:
             visual_tokens = visual_tokens.unsqueeze(1)
@@ -232,6 +235,7 @@ class PromptSGReID(nn.Module):
         return {
             'visual_tokens': visual_tokens.float(),
             'global_proj': visual_tokens[:, 0, :].float(),
+            'intermediate_hidden': intermediate_hidden,
         }
 
     def cross_former(self, q, k, v):
@@ -271,10 +275,20 @@ class PromptSGReID(nn.Module):
         fused_bn = self.bottleneck(fused)
         cls_score = self.classifier(fused_bn)
 
+        # Multi-layer triplet: fused feature + CLS tokens from preceding 2 ViT layers
+        triplet_feats = [fused]
+        intermediate = visual.get('intermediate_hidden', [])
+        # intermediate contains last 3 ViT layer outputs (LND format)
+        # Use the first 2 (preceding layers), skip the last (already used via cross-modal)
+        for h in intermediate[:-1]:
+            h_nld = h.permute(1, 0, 2).float()  # LND -> NLD
+            cls_token = h_nld[:, 0, :]           # CLS token from this layer
+            triplet_feats.append(cls_token)
+
         return {
             'cls_score': cls_score,
             'triplet_feat': fused,
-            'triplet_feats': [fused],
+            'triplet_feats': triplet_feats,
             'global_image': visual['global_proj'],
             'text_feat': text_feature,
             'fused_feat': fused,

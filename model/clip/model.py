@@ -212,14 +212,29 @@ class VisionTransformer(nn.Module):
         x = x + self.positional_embedding.to(x.dtype)
         x = self.ln_pre(x)
         x = x.permute(1, 0, 2)
-        outputs = self.transformer([x])
-        x = outputs[0]
-        atten = outputs[1]
+
+        # Manually iterate through resblocks to collect last 3 layer outputs
+        num_layers = len(self.transformer.resblocks)
+        hidden = [x]
+        intermediate_hidden = []
+        for i, block in enumerate(self.transformer.resblocks):
+            hidden = block(hidden)
+            if i >= num_layers - 3:
+                h = hidden[0] if isinstance(hidden, (list, tuple)) else hidden
+                intermediate_hidden.append(h)
+
+        if isinstance(hidden, (list, tuple)):
+            x = hidden[0]
+            atten = hidden[1]
+        else:
+            x = hidden
+            atten = None
+
         x = x.permute(1, 0, 2)
         x = self.ln_post(x)
         if self.proj is not None:
             x = x @ self.proj
-        return x, atten
+        return x, atten, intermediate_hidden
 
 
 class CLIP(nn.Module):
