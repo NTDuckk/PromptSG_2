@@ -370,10 +370,10 @@ def do_inference_promptsg(
     except Exception:
         logger.exception("Error while logging PromptSG multi-branch debug info")
 
-    primary_pair = getattr(cfg.TEST, "PRIMARY_EVAL_PAIR", "text_to_image_cls")
+    primary_pair = getattr(cfg.TEST, "PRIMARY_EVAL_PAIR", "cross_to_cross")
     if primary_pair not in results:
-        logger.warning("Unknown PRIMARY_EVAL_PAIR=%s. Falling back to text_to_image_cls", primary_pair)
-        primary_pair = "text_to_image_cls"
+        logger.warning("Unknown PRIMARY_EVAL_PAIR=%s. Falling back to cross_to_cross", primary_pair)
+        primary_pair = "cross_to_cross"
 
     primary = results[primary_pair]
     return primary["cmc"][0], primary["cmc"][4], primary["mAP"]
