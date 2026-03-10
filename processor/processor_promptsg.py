@@ -241,7 +241,7 @@ def do_inference_promptsg(
 
     model.eval()
 
-    q_text_feats, q_img_feats = [], []
+    q_img_feats, q_cross_feats = [], []
     g_img_feats, g_cross_feats = [], []
     q_pids, q_camids = [], []
     g_pids, g_camids = [], []
@@ -286,9 +286,9 @@ def do_inference_promptsg(
             end_idx = processed + batch_size
 
             if end_idx <= num_query:
-                q_text, q_img, _ = _extract_modal_feats(img, cam_batch=camids, view_batch=target_view)
-                q_text_feats.append(q_text.cpu())
+                _, q_img, q_cross = _extract_modal_feats(img, cam_batch=camids, view_batch=target_view)
                 q_img_feats.append(q_img.cpu())
+                q_cross_feats.append(q_cross.cpu())
                 q_pids.extend(np.asarray(pid))
                 q_camids.extend(np.asarray(camid))
 
@@ -307,9 +307,9 @@ def do_inference_promptsg(
                 q_cam_batch = camid[:q_num]
                 q_camids_batch = camids[:q_num] if camids is not None else None
                 q_view_batch = target_view[:q_num] if target_view is not None else None
-                q_text, q_img, _ = _extract_modal_feats(q_img_batch, cam_batch=q_camids_batch, view_batch=q_view_batch)
-                q_text_feats.append(q_text.cpu())
+                _, q_img, q_cross = _extract_modal_feats(q_img_batch, cam_batch=q_camids_batch, view_batch=q_view_batch)
                 q_img_feats.append(q_img.cpu())
+                q_cross_feats.append(q_cross.cpu())
                 q_pids.extend(np.asarray(q_pid_batch))
                 q_camids.extend(np.asarray(q_cam_batch))
 
@@ -326,8 +326,8 @@ def do_inference_promptsg(
 
             processed += batch_size
 
-    q_text_feats = torch.cat(q_text_feats, dim=0)
     q_img_feats = torch.cat(q_img_feats, dim=0)
+    q_cross_feats = torch.cat(q_cross_feats, dim=0)
     g_img_feats = torch.cat(g_img_feats, dim=0)
     g_cross_feats = torch.cat(g_cross_feats, dim=0)
 
@@ -339,35 +339,30 @@ def do_inference_promptsg(
     metric_name = getattr(cfg.TEST, "DIST_METRIC", "cosine")
 
     results = {
-        "text_to_image_cls": compute_reid_metrics(
-            q_text_feats, g_img_feats, q_pids, g_pids, q_camids, g_camids,
-            max_rank=50, metric=metric_name, normalize=False,
-        ),
         "image_to_image": compute_reid_metrics(
             q_img_feats, g_img_feats, q_pids, g_pids, q_camids, g_camids,
             max_rank=50, metric=metric_name, normalize=False,
         ),
-        "text_to_cross": compute_reid_metrics(
-            q_text_feats, g_cross_feats, q_pids, g_pids, q_camids, g_camids,
+        "cross_to_cross": compute_reid_metrics(
+            q_cross_feats, g_cross_feats, q_pids, g_pids, q_camids, g_camids,
             max_rank=50, metric=metric_name, normalize=False,
         ),
     }
 
     logger.info("Validation Results")
-    logger.info(format_reid_result("text->image_cls", results["text_to_image_cls"]))
     logger.info(format_reid_result("image->image", results["image_to_image"]))
-    logger.info(format_reid_result("text->cross", results["text_to_cross"]))
+    logger.info(format_reid_result("cross->cross", results["cross_to_cross"]))
 
     try:
         logger.info(
-            "feature shapes | q_text: {} q_img: {} g_img: {} g_cross: {}".format(
-                tuple(q_text_feats.shape), tuple(q_img_feats.shape), tuple(g_img_feats.shape), tuple(g_cross_feats.shape)
-            )
+            "feature shapes | q_img: {} q_cross: {} g_img: {} g_cross: {}".format(
+                    tuple(q_img_feats.shape), tuple(q_cross_feats.shape), tuple(g_img_feats.shape), tuple(g_cross_feats.shape)
+                )
         )
         logger.info(
-            "mean norms | q_text: {:.4f} q_img: {:.4f} g_img: {:.4f} g_cross: {:.4f}".format(
-                float(q_text_feats.norm(dim=1).mean()),
+            "mean norms | q_img: {:.4f} q_cross: {:.4f} g_img: {:.4f} g_cross: {:.4f}".format(
                 float(q_img_feats.norm(dim=1).mean()),
+                float(q_cross_feats.norm(dim=1).mean()),
                 float(g_img_feats.norm(dim=1).mean()),
                 float(g_cross_feats.norm(dim=1).mean()),
             )
