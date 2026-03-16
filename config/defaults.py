@@ -170,7 +170,7 @@ _C.SOLVER.STAGE2.BASE_LR = 3e-4
 # Whether using larger learning rate for fc layer
 _C.SOLVER.STAGE2.LARGE_FC_LR = False
 # Factor of learning bias
-_C.SOLVER.STAGE2.BIAS_LR_FACTOR = 1
+_C.SOLVER.STAGE2.BIAS_LR_FACTOR = 1.0
 # Momentum
 _C.SOLVER.STAGE2.MOMENTUM = 0.9
 # Margin of triplet loss
