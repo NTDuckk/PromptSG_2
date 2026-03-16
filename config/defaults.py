@@ -62,6 +62,8 @@ _C.MODEL.SIE_COE = 3.0
 _C.MODEL.SIE_CAMERA = False
 _C.MODEL.SIE_VIEW = False
 
+_C.MODEL.CMT_DEPTH = 2
+
 # -----------------------------------------------------------------------------
 # INPUT
 # -----------------------------------------------------------------------------
@@ -209,7 +211,12 @@ _C.SOLVER.STAGE2.EVAL_PERIOD = 10
 # Number of images per batch
 # This is global, so if we have 8 GPUs and IMS_PER_BATCH = 128, each GPU will
 # contain 16 images per batch
-
+_C.SOLVER.STAGE2.LR_FACTOR = 1.0
+_C.SOLVER.STAGE2.IMAGE_ENCODER_WARMUP_LR_INIT = 1e-6
+_C.SOLVER.STAGE2.IMAGE_ENCODER_WARMUP_LR_PEAK = 1e-5
+_C.SOLVER.STAGE2.IMAGE_ENCODER_WARMUP_EPOCHS = 5
+_C.SOLVER.STAGE2.IMAGE_ENCODER_HOLD_EPOCHS = 10
+_C.DATASETS.DATASET_FLAG = 'clipreid'
 # ---------------------------------------------------------------------------- #
 # TEST
 # ---------------------------------------------------------------------------- #
