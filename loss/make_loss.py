@@ -8,12 +8,13 @@ import torch.nn.functional as F
 from .softmax_loss import CrossEntropyLabelSmooth, LabelSmoothingCrossEntropy
 from .triplet_loss import TripletLoss
 from .center_loss import CenterLoss
-
+from .supcontrast import SupConLoss
 
 def make_loss(cfg, num_classes):    # modified by gu
     sampler = cfg.DATALOADER.SAMPLER
     feat_dim = 2048
     center_criterion = CenterLoss(num_classes=num_classes, feat_dim=feat_dim, use_gpu=True)  # center loss
+    device = "cuda"
     if 'triplet' in cfg.MODEL.METRIC_LOSS_TYPE:
         if cfg.MODEL.NO_MARGIN:
             triplet = TripletLoss()
@@ -24,7 +25,7 @@ def make_loss(cfg, num_classes):    # modified by gu
     else:
         print('expected METRIC_LOSS_TYPE should be triplet'
               'but got {}'.format(cfg.MODEL.METRIC_LOSS_TYPE))
-
+    supcon = SupConLoss(device)
     if cfg.MODEL.IF_LABELSMOOTH == 'on':
         xent = CrossEntropyLabelSmooth(num_classes=num_classes)
         print("label smooth on, numclasses:", num_classes)
@@ -32,51 +33,45 @@ def make_loss(cfg, num_classes):    # modified by gu
     if sampler == 'softmax':
         def loss_func(score, feat, target):
             return F.cross_entropy(score, target)
-
+    
     elif cfg.DATALOADER.SAMPLER == 'softmax_triplet':
-        def loss_func(score, feat, target, target_cam, i2tscore = None):
+        # def loss_func(score, feat, target, target_cam, i2tscore = None):
+        def loss_func(outputs, target, target_cam=None):
             if cfg.MODEL.METRIC_LOSS_TYPE == 'triplet':
+                score = outputs["cls_score"]
+                feat = outputs["global_feat"]
+                text_feat = outputs["text_feat"]
+                img_feat_proj = outputs["img_feat_proj"]
+                
+                 # ID loss
                 if cfg.MODEL.IF_LABELSMOOTH == 'on':
                     if isinstance(score, list):
-                        ID_LOSS = [xent(scor, target) for scor in score[0:]]
-                        ID_LOSS = sum(ID_LOSS)
+                        id_loss = sum([xent(s, target) for s in score])
                     else:
-                        ID_LOSS = xent(score, target)
-
-                    if isinstance(feat, list):
-                        TRI_LOSS = [triplet(feats, target)[0] for feats in feat[0:]]
-                        TRI_LOSS = sum(TRI_LOSS) 
-                    else:   
-                        TRI_LOSS = triplet(feat, target)[0]
-                    
-                    loss = cfg.MODEL.ID_LOSS_WEIGHT * ID_LOSS + cfg.MODEL.TRIPLET_LOSS_WEIGHT * TRI_LOSS
-
-                    if i2tscore != None:
-                        I2TLOSS = xent(i2tscore, target)
-                        loss = cfg.MODEL.I2T_LOSS_WEIGHT * I2TLOSS + loss
-                        
-                    return loss
+                        id_loss = xent(score, target)
                 else:
                     if isinstance(score, list):
-                        ID_LOSS = [F.cross_entropy(scor, target) for scor in score[0:]]
-                        ID_LOSS = sum(ID_LOSS)
+                        id_loss = sum([F.cross_entropy(s, target) for s in score])
                     else:
-                        ID_LOSS = F.cross_entropy(score, target)
+                        id_loss = F.cross_entropy(score, target)
 
-                    if isinstance(feat, list):
-                            TRI_LOSS = [triplet(feats, target)[0] for feats in feat[0:]]
-                            TRI_LOSS = sum(TRI_LOSS)
-                    else:
-                            TRI_LOSS = triplet(feat, target)[0]
+                # Triplet loss
+                if isinstance(feat, list):
+                    tri_loss = sum([triplet(f, target)[0] for f in feat])
+                else:
+                    tri_loss = triplet(feat, target)[0]
 
-                    loss = cfg.MODEL.ID_LOSS_WEIGHT * ID_LOSS + cfg.MODEL.TRIPLET_LOSS_WEIGHT * TRI_LOSS
-                    
-                    if i2tscore != None:
-                        I2TLOSS = F.cross_entropy(i2tscore, target)
-                        loss = cfg.MODEL.I2T_LOSS_WEIGHT * I2TLOSS + loss
+                # Symmetric SupCon
+                supcon_i2t = supcon(text_feat, img_feat_proj, target, target)
+                supcon_t2i = supcon(img_feat_proj, text_feat, target, target)
+                supcon_loss = supcon_i2t + supcon_t2i
 
+                return {
+                    "supcon_loss": supcon_loss,
+                    "id_loss": id_loss,
+                    "tri_loss": tri_loss,
+                }
 
-                    return loss
             else:
                 print('expected METRIC_LOSS_TYPE should be triplet'
                       'but got {}'.format(cfg.MODEL.METRIC_LOSS_TYPE))

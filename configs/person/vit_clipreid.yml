@@ -8,6 +8,7 @@ MODEL:
   ID_LOSS_WEIGHT : 0.25
   TRIPLET_LOSS_WEIGHT : 1.0
   I2T_LOSS_WEIGHT : 1.0
+  CMT_DEPTH: 2
   # SIE_CAMERA: True
   # SIE_COE : 1.0
 
@@ -40,22 +41,44 @@ SOLVER:
     LOG_PERIOD: 50
     WARMUP_EPOCHS: 5
   
+  # STAGE2:
+  #   IMS_PER_BATCH: 64
+  #   OPTIMIZER_NAME: "Adam"
+  #   BASE_LR: 0.000005
+  #   WARMUP_METHOD: 'linear'
+  #   WARMUP_ITERS: 10
+  #   WARMUP_FACTOR: 0.1
+  #   WEIGHT_DECAY:  0.0001
+  #   WEIGHT_DECAY_BIAS: 0.0001
+  #   LARGE_FC_LR: False
+  #   MAX_EPOCHS: 60
+  #   CHECKPOINT_PERIOD: 60
+  #   LOG_PERIOD: 50
+  #   EVAL_PERIOD: 60
+  #   BIAS_LR_FACTOR: 2
+    # STEPS: [30, 50]
+    # GAMMA: 0.1
   STAGE2:
     IMS_PER_BATCH: 64
     OPTIMIZER_NAME: "Adam"
-    BASE_LR: 0.000005
-    WARMUP_METHOD: 'linear'
-    WARMUP_ITERS: 10
-    WARMUP_FACTOR: 0.1
-    WEIGHT_DECAY:  0.0001
-    WEIGHT_DECAY_BIAS: 0.0001
-    LARGE_FC_LR: False
+
+    BASE_LR: 5e-6
+    LR_FACTOR: 10.0
+    BIAS_LR_FACTOR: 2.0
+
+    WEIGHT_DECAY: 4e-5
+    WEIGHT_DECAY_BIAS: 0.0
+
+    IMAGE_ENCODER_WARMUP_LR_INIT: 1e-6
+    IMAGE_ENCODER_WARMUP_LR_PEAK: 1e-5
+    IMAGE_ENCODER_WARMUP_EPOCHS: 5
+    IMAGE_ENCODER_HOLD_EPOCHS: 10
+
     MAX_EPOCHS: 60
     CHECKPOINT_PERIOD: 60
     LOG_PERIOD: 50
     EVAL_PERIOD: 60
-    BIAS_LR_FACTOR: 2
-    
+
     STEPS: [30, 50]
     GAMMA: 0.1
   
@@ -68,9 +91,10 @@ TEST:
   FEAT_NORM: 'yes'
 
 DATASETS:
-#   NAMES: ('market1501')
-#   ROOT_DIR: ('')
-# OUTPUT_DIR: ''
+  NAMES: ('market1501')
+  ROOT_DIR: ('datasets/dataset')
+  DATASET_FLAG: 'clipreid'
+OUTPUT_DIR: 'vit_clipreid_market1501/logs'
 
 #   NAMES: ('dukemtmc')
 #   ROOT_DIR: ('')

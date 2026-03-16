@@ -2,7 +2,7 @@ import os
 from config import cfg
 import argparse
 from datasets.make_dataloader_clipreid import make_dataloader
-from model.make_model_clipreid import make_model
+from model.make_model_promptsg import make_model
 from processor.processor_clipreid_stage2 import do_inference
 from utils.logger import setup_logger
 

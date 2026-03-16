@@ -8,10 +8,10 @@ import torch
 import torch.nn as nn
 
 class SupConLoss(nn.Module):
-    def __init__(self, device, temperature=0.07):
+    def __init__(self, device):
         super(SupConLoss, self).__init__()
         self.device = device
-        self.temperature = temperature
+        self.temperature = 1.0
     def forward(self, text_features, image_features, t_label, i_targets): 
         batch_size = text_features.shape[0] 
         batch_size_N = image_features.shape[0] 
