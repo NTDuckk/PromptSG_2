@@ -237,6 +237,8 @@ _C.TEST.FEAT_NORM = True
 _C.TEST.DIST_MAT = "dist_mat.npy"
 # Whether calculate the eval score option: 'True', 'False'
 _C.TEST.EVAL = False
+_C.TEST.EVAL_MODE = 'cross_cls'
+
 # ---------------------------------------------------------------------------- #
 # Misc options
 # ---------------------------------------------------------------------------- #
