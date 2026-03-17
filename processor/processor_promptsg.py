@@ -165,6 +165,7 @@ def do_train_promptsg(cfg,
                 )
 
         eval_mode = cfg.TEST.EVAL_MODE
+        loader_flag = cfg.DATASETS.DATASET_FLAG
         if epoch % eval_period == 0:
             if cfg.MODEL.DIST_TRAIN:
                 if dist.get_rank() == 0:
@@ -213,7 +214,12 @@ def do_train_promptsg(cfg,
                         logger.info("CMC curve, Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
                     torch.cuda.empty_cache()
                 elif eval_mode == 'cross_cls':
-                    for n_iter, (img, vid, camid, camids, target_view, _) in enumerate(query_loader):
+                    loader1 = query_loader
+                    loader2 = gallery_loader
+                    if loader_flag == 'query':
+                        loader1 = val_loader
+                        loader2 = val_loader
+                    for n_iter, (img, vid, camid, camids, target_view, _) in enumerate(loader1):
                         with torch.no_grad():
                             img = img.to(device)
                             if cfg.MODEL.SIE_CAMERA:
@@ -228,7 +234,7 @@ def do_train_promptsg(cfg,
                                                eval_mode = eval_mode, dataset_flag = 'query')
                             evaluator.update((feat_query, vid, camid))
                     
-                    for n_iter, (img, vid, camid, camids, target_view, _) in enumerate(gallery_loader):
+                    for n_iter, (img, vid, camid, camids, target_view, _) in enumerate(loader2):
                         with torch.no_grad():
                             img = img.to(device)
                             if cfg.MODEL.SIE_CAMERA:

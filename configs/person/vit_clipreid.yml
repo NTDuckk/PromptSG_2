@@ -94,7 +94,7 @@ TEST:
 DATASETS:
   NAMES: ('market1501')
   ROOT_DIR: ('datasets/dataset')
-  DATASET_FLAG: 'clipreid'
+  DATASET_FLAG: 'query'
 OUTPUT_DIR: 'vit_clipreid_market1501/logs'
 
 #   NAMES: ('dukemtmc')
