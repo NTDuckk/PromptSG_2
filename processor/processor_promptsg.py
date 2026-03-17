@@ -231,6 +231,14 @@ def do_train_promptsg(cfg,
                     for n_iter, (img, vid, camid, camids, target_view, _) in enumerate(gallery_loader):
                         with torch.no_grad():
                             img = img.to(device)
+                            if cfg.MODEL.SIE_CAMERA:
+                                camids = camids.to(device)
+                            else:
+                                camids = None
+                            if cfg.MODEL.SIE_VIEW:
+                                target_view = target_view.to(device)
+                            else:
+                                target_view = None
                             feat_gallery = model(img, cam_label=camids, view_label=target_view,
                                                eval_mode = eval_mode, dataset_flag = 'gallery')
                             evaluator.update_gallery((feat_gallery, vid, camid))
