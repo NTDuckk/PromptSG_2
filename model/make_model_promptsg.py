@@ -259,7 +259,8 @@ class build_transformer(nn.Module):
         x = self.ln_post(x)
         return x
 
-    def forward(self, x=None, label=None, cam_label=None, view_label=None):
+    def forward(self, x=None, label=None, cam_label=None, view_label=None,
+                eval_mode=None, dataset_flag=None):
         if x is None:
             raise ValueError("Input image x must not be None.")
 
@@ -319,10 +320,17 @@ class build_transformer(nn.Module):
                 "img_feat_proj": img_feature_proj_norm  # cho SupCon
             }
         else:
-            if self.neck_feat == 'after':
-                return cross_x_bn
-            else:
-                return cross_feat
+            if eval_mode == 'clipreid':
+                if self.neck_feat == 'after':
+                    return cross_x_bn
+                else:
+                    return cross_feat
+            elif eval_mode == 'cross_cls':
+                if dataset_flag == 'query':
+                    return cross_x_bn
+                else:
+                    return img_feature_proj
+                    
     
     def load_param(self, trained_path):
         param_dict = torch.load(trained_path)

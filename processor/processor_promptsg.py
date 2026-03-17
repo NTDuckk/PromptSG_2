@@ -19,6 +19,8 @@ def do_train_promptsg(cfg,
                       scheduler,
                       loss_fn,
                       num_query,
+                      query_loader, 
+                      gallery_loader,
                       local_rank):
     log_period = cfg.SOLVER.STAGE2.LOG_PERIOD
     checkpoint_period = cfg.SOLVER.STAGE2.CHECKPOINT_PERIOD
@@ -55,7 +57,8 @@ def do_train_promptsg(cfg,
         id_loss_meter.reset()
         tri_loss_meter.reset()
         evaluator.reset()
-
+        evaluator.reset_gallery()
+        
         scheduler.step()
         model.train()
 
@@ -161,6 +164,7 @@ def do_train_promptsg(cfg,
                     os.path.join(cfg.OUTPUT_DIR, cfg.MODEL.NAME + '_{}.pth'.format(epoch))
                 )
 
+        eval_mode = cfg.TEST.EVAL_MODE
         if epoch % eval_period == 0:
             if cfg.MODEL.DIST_TRAIN:
                 if dist.get_rank() == 0:
@@ -187,26 +191,48 @@ def do_train_promptsg(cfg,
                     torch.cuda.empty_cache()
             else:
                 model.eval()
-                for n_iter, (img, vid, camid, camids, target_view, _) in enumerate(val_loader):
-                    with torch.no_grad():
-                        img = img.to(device)
-                        if cfg.MODEL.SIE_CAMERA:
-                            camids = camids.to(device)
-                        else:
-                            camids = None
-                        if cfg.MODEL.SIE_VIEW:
-                            target_view = target_view.to(device)
-                        else:
-                            target_view = None
-                        feat = model(img, cam_label=camids, view_label=target_view)
-                        evaluator.update((feat, vid, camid))
+                if eval_mode == 'clipreid':
+                    for n_iter, (img, vid, camid, camids, target_view, _) in enumerate(val_loader):
+                        with torch.no_grad():
+                            img = img.to(device)
+                            if cfg.MODEL.SIE_CAMERA:
+                                camids = camids.to(device)
+                            else:
+                                camids = None
+                            if cfg.MODEL.SIE_VIEW:
+                                target_view = target_view.to(device)
+                            else:
+                                target_view = None
+                            feat = model(img, cam_label=camids, view_label=target_view, eval_mode = eval_mode)
+                            evaluator.update((feat, vid, camid))
 
-                cmc, mAP, _, _, _, _, _ = evaluator.compute()
-                logger.info("Validation Results - Epoch: {}".format(epoch))
-                logger.info("mAP: {:.1%}".format(mAP))
-                for r in [1, 5, 10]:
-                    logger.info("CMC curve, Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
-                torch.cuda.empty_cache()
+                    cmc, mAP, _, _, _, _, _ = evaluator.compute()
+                    logger.info("Validation Results - Epoch: {}".format(epoch))
+                    logger.info("mAP: {:.1%}".format(mAP))
+                    for r in [1, 5, 10]:
+                        logger.info("CMC curve, Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
+                    torch.cuda.empty_cache()
+                elif eval_mode == 'cross_cls':
+                    for n_iter, (img, vid, camid, camids, target_view, _) in enumerate(query_loader):
+                        with torch.no_grad():
+                            img = img.to(device)
+                            feat_query = model(img, cam_label=camids, view_label=target_view,
+                                               eval_mode = eval_mode, dataset_flag = 'query')
+                            evaluator.update((feat_query, vid, camid))
+                    
+                    for n_iter, (img, vid, camid, camids, target_view, _) in enumerate(gallery_loader):
+                        with torch.no_grad():
+                            img = img.to(device)
+                            feat_gallery = model(img, cam_label=camids, view_label=target_view,
+                                               eval_mode = eval_mode, dataset_flag = 'gallery')
+                            evaluator.update_gallery((feat_gallery, vid, camid))
+                    
+                    cmc, mAP, _, _, _, _, _, _, _, _, _ = evaluator.compute_cross_cls()
+                    logger.info("Validation Results - Epoch: {}".format(epoch))
+                    logger.info("mAP: {:.1%}".format(mAP / 100.0))
+                    for r in [1, 5, 10]:
+                        logger.info("CMC curve, Rank-{:<3}:{:.1%}".format(r, cmc[r - 1] / 100.0))
+                    torch.cuda.empty_cache()
 
     all_end_time = time.monotonic()
     total_time = timedelta(seconds=all_end_time - all_start_time)
@@ -224,6 +250,7 @@ def do_inference(cfg,
 
     evaluator = R1_mAP_eval(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
     evaluator.reset()
+    evaluator.reset_gallery()
 
     if device:
         if torch.cuda.device_count() > 1:

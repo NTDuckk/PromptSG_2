@@ -86,6 +86,79 @@ def eval_func(distmat, q_pids, g_pids, q_camids, g_camids, max_rank=50):
 
     return all_cmc, mAP
 
+def eval_func_rank(similarity, q_pids, g_pids, max_rank=10, get_mAP=True):
+    """
+    Rank evaluation directly from similarity matrix.
+    Returns metrics in percentage scale: 0..100
+    """
+    if not torch.is_tensor(similarity):
+        similarity = torch.tensor(similarity)
+
+    similarity = similarity.detach().cpu()
+
+    if not torch.is_tensor(q_pids):
+        q_pids = torch.tensor(q_pids, dtype=torch.long)
+    else:
+        q_pids = q_pids.detach().cpu().long()
+
+    if not torch.is_tensor(g_pids):
+        g_pids = torch.tensor(g_pids, dtype=torch.long)
+    else:
+        g_pids = g_pids.detach().cpu().long()
+
+    max_rank = min(max_rank, similarity.size(1))
+
+    if get_mAP:
+        indices = torch.argsort(similarity, dim=1, descending=True)
+    else:
+        _, indices = torch.topk(
+            similarity, k=max_rank, dim=1, largest=True, sorted=True
+        )
+
+    pred_labels = g_pids[indices]
+    matches = pred_labels.eq(q_pids.view(-1, 1))
+
+    all_cmc = matches[:, :max_rank].cumsum(1)
+    all_cmc[all_cmc > 1] = 1
+    all_cmc = all_cmc.float().mean(0) * 100.0
+
+    if not get_mAP:
+        return all_cmc, indices
+
+    num_rel = matches.sum(1)
+    valid = num_rel > 0
+    assert valid.any(), "Error: all query identities do not appear in gallery"
+
+    matches = matches[valid]
+    num_rel = num_rel[valid]
+    indices = indices[valid]
+
+    tmp_cmc = matches.cumsum(1)
+
+    inp = []
+    for i, match_row in enumerate(matches):
+        pos_idx = torch.nonzero(match_row, as_tuple=False).squeeze(1)
+        last_pos = pos_idx[-1]
+        inp.append(tmp_cmc[i, last_pos].float() / (last_pos.float() + 1.0))
+    mINP = torch.stack(inp).mean() * 100.0
+
+    precision = tmp_cmc.float() / torch.arange(
+        1, tmp_cmc.shape[1] + 1, dtype=torch.float32
+    ).unsqueeze(0)
+    AP = (precision * matches.float()).sum(1) / num_rel.float()
+    mAP = AP.mean() * 100.0
+
+    return all_cmc, mAP, mINP, indices
+
+
+def rank(similarity, q_pids, g_pids, max_rank=10, get_mAP=True):
+    return eval_func_rank(
+        similarity=similarity,
+        q_pids=q_pids,
+        g_pids=g_pids,
+        max_rank=max_rank,
+        get_mAP=get_mAP
+    )
 
 class R1_mAP_eval():
     def __init__(self, num_query, max_rank=50, feat_norm=True, reranking=False):
@@ -99,12 +172,23 @@ class R1_mAP_eval():
         self.feats = []
         self.pids = []
         self.camids = []
-
+    
+    def reset_gallery(self):
+        self.feats_gallery = []
+        self.pids_gallery = []
+        self.camids_gallery = []
+        
     def update(self, output):  # called once for each batch
         feat, pid, camid = output
         self.feats.append(feat.cpu())
         self.pids.extend(np.asarray(pid))
         self.camids.extend(np.asarray(camid))
+
+    def update_gallery(self, output):  # called once for each batch
+        feat, pid, camid = output
+        self.feats_gallery.append(feat.cpu())
+        self.pids_gallery.extend(np.asarray(pid))
+        self.camids_gallery.extend(np.asarray(camid))
 
     def compute(self):  # called after each epoch
         feats = torch.cat(self.feats, dim=0)
@@ -118,7 +202,6 @@ class R1_mAP_eval():
         # gallery
         gf = feats[self.num_query:]
         g_pids = np.asarray(self.pids[self.num_query:])
-
         g_camids = np.asarray(self.camids[self.num_query:])
         if self.reranking:
             print('=> Enter reranking')
@@ -132,5 +215,30 @@ class R1_mAP_eval():
 
         return cmc, mAP, distmat, self.pids, self.camids, qf, gf
 
-
-
+    def compute_cross_cls(self):
+        feats = torch.cat(self.feats, dim=0)
+        feats_gallery = torch.cat(self.feats_gallery, dim=0)
+        if self.feat_norm:
+            print("The test feature is normalized")
+            feats = torch.nn.functional.normalize(feats, p=2, dim=1)
+            feats_gallery = torch.nn.functional.normalize(feats_gallery, p=2, dim=1)
+        
+        # query
+        qf = feats
+        q_pids = np.asarray(self.pids)
+        q_camids = np.asarray(self.camids)
+        # gallery
+        gf = feats_gallery
+        g_pids = np.asarray(self.pids_gallery)
+        g_camids = np.asarray(self.camids_gallery)
+        
+        sims = qf @ gf.t()
+        
+        cmc, mAP, mINP, indices = eval_func_rank(
+            similarity=sims,
+            q_pids=q_pids,
+            g_pids=g_pids,
+            max_rank=self.max_rank,
+            get_mAP=True
+        )
+        return cmc, mAP, mINP, sims, q_pids, g_pids, q_camids, g_camids, qf, gf, indices

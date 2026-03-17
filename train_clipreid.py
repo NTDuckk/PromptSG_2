@@ -69,7 +69,7 @@ if __name__ == '__main__':
     if cfg.MODEL.DIST_TRAIN:
         torch.distributed.init_process_group(backend='nccl', init_method='env://')
 
-    train_loader_stage2, _, val_loader, num_query, num_classes, camera_num, view_num = make_dataloader(cfg)
+    train_loader_stage2, _, val_loader, num_query, num_classes, camera_num, view_num, query_loader, gallery_loader = make_dataloader(cfg)
 
     model = make_model(
         cfg,
@@ -96,5 +96,7 @@ if __name__ == '__main__':
         scheduler_2stage,
         loss_func,
         num_query,
+        query_loader, 
+        gallery_loader,
         args.local_rank
     )

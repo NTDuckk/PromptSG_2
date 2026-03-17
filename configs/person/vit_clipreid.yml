@@ -88,7 +88,8 @@ TEST:
   RE_RANKING: False
   WEIGHT: ''
   NECK_FEAT: 'before'
-  FEAT_NORM: 'yes'
+  FEAT_NORM: True
+  EVAL_MODE: 'cross_cls'
 
 DATASETS:
   NAMES: ('market1501')
