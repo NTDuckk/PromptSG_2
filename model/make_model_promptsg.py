@@ -312,10 +312,13 @@ class build_transformer(nn.Module):
         cross_x_bn = self.bottleneck_proj(cross_feat)
         cls_score = self.classifier_proj(cross_x_bn).float()
 
+        feat = self.bottleneck(img_feature)
+        feat_cls_score = self.classifier(feat).float()
+
         if self.training:
             return {
-                "cls_score": cls_score,                  # cho ID loss
-                "global_feat": cross_feat,              # cho Triplet loss
+                "cls_score": [cls_score, feat_cls_score],                  # cho ID loss
+                "global_feat": [cross_feat, img_feature_proj, img_feature, img_feature_last],  # cho Triplet loss
                 "text_feat": text_feature_norm,         # cho SupCon
                 "img_feat_proj": img_feature_proj_norm  # cho SupCon
             }
