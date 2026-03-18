@@ -325,7 +325,7 @@ class build_transformer(nn.Module):
         else:
             if eval_mode == 'clipreid':
                 if self.neck_feat == 'after':
-                    return cross_x_bn
+                    return [cross_x_bn, feat]
                 else:
                     return cross_feat
             elif eval_mode == 'cross_cls':
