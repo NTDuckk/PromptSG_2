@@ -162,6 +162,10 @@ class build_transformer(nn.Module):
         self.bottleneck_proj.bias.requires_grad_(False)
         self.bottleneck_proj.apply(weights_init_kaiming)
 
+        self.classifier_id_bge = nn.Linear(self.embed_dim, self.num_classes)
+        nn.init.normal_(self.classifier_id_bge.weight.data, std=0.001)
+        nn.init.constant_(self.classifier_id_bge.bias.data, val=0.0)
+
         self.h_resolution = int((cfg.INPUT.SIZE_TRAIN[0] - 16) // cfg.MODEL.STRIDE_SIZE[0] + 1)
         self.w_resolution = int((cfg.INPUT.SIZE_TRAIN[1] - 16) // cfg.MODEL.STRIDE_SIZE[1] + 1)
         self.vision_stride_size = cfg.MODEL.STRIDE_SIZE[0]
@@ -309,23 +313,26 @@ class build_transformer(nn.Module):
             image_features_proj             # [B,L,C]
         )
         cross_feat = cross_x.squeeze(1)  # [B,C]
-        cross_x_bn = self.bottleneck_proj(cross_feat)
+        cross_x_bn = self.bottleneck_proj(cross_feat)   
         cls_score = self.classifier_proj(cross_x_bn).float()
 
         feat = self.bottleneck(img_feature)
         feat_cls_score = self.classifier(feat).float()
 
+        image_logits = self.classifier_id_bge(img_feature_proj).float()
+        text_logits = self.classifier_id_bge(text_feature).float()
         if self.training:
             return {
-                "cls_score": [cls_score, feat_cls_score],                  # cho ID loss
-                "global_feat": [cross_feat, img_feature_proj, img_feature, img_feature_last],  # cho Triplet loss
+                "cls_score": [cls_score, feat_cls_score, image_logits, text_logits],                  # cho ID loss
+                "global_feat": [cross_feat, text_feature, img_feature_proj, img_feature, img_feature_last],  # cho Triplet loss
                 "text_feat": text_feature_norm,         # cho SupCon
                 "img_feat_proj": img_feature_proj_norm  # cho SupCon
             }
         else:
             if eval_mode == 'clipreid':
                 if self.neck_feat == 'after':
-                    return torch.cat([cross_x_bn, feat], dim=1)
+                    # return torch.cat([cross_x_bn, feat], dim=1)
+                    return torch.cat([cross_x_bn, feat, F.normalize(img_feature_proj, dim=1)], dim=1)
                 else:
                     return cross_feat
             elif eval_mode == 'cross_cls':
