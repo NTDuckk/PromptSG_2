@@ -77,7 +77,7 @@ SOLVER:
     MAX_EPOCHS: 90
     CHECKPOINT_PERIOD: 90
     LOG_PERIOD: 50
-    EVAL_PERIOD: 10
+    EVAL_PERIOD: 1
 
     STEPS: [30, 50]
     GAMMA: 0.1
@@ -89,12 +89,13 @@ TEST:
   WEIGHT: ''
   NECK_FEAT: 'after'
   FEAT_NORM: True
-  EVAL_MODE: 'clipreid'
+  # EVAL_MODE: 'clipreid
+  EVAL_MODE: 'cross_cls'
 
 DATASETS:
   NAMES: ('market1501')
   ROOT_DIR: ('datasets/dataset')
-  DATASET_FLAG: 'clipreid'
+  DATASET_FLAG: 'query'
 OUTPUT_DIR: 'vit_clipreid_market1501/logs'
 
 #   NAMES: ('dukemtmc')

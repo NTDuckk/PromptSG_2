@@ -153,6 +153,9 @@ class build_transformer(nn.Module):
         # classifier / bn used on cross-modal output
         self.classifier_proj = nn.Linear(self.embed_dim, self.num_classes, bias=False)
         self.classifier_proj.apply(weights_init_classifier)
+        
+        self.classifier_proj_cross = nn.Linear(self.embed_dim, self.num_classes, bias=False)
+        self.classifier_proj_cross.apply(weights_init_classifier)
 
         self.bottleneck = nn.BatchNorm1d(self.in_planes)
         self.bottleneck.bias.requires_grad_(False)
@@ -161,6 +164,10 @@ class build_transformer(nn.Module):
         self.bottleneck_proj = nn.BatchNorm1d(self.embed_dim)
         self.bottleneck_proj.bias.requires_grad_(False)
         self.bottleneck_proj.apply(weights_init_kaiming)
+
+        self.bottleneck_proj_cross = nn.BatchNorm1d(self.embed_dim)
+        self.bottleneck_proj_cross.bias.requires_grad_(False)
+        self.bottleneck_proj_cross.apply(weights_init_kaiming)
 
         self.classifier_id_bge = nn.Linear(self.embed_dim, self.num_classes)
         nn.init.normal_(self.classifier_id_bge.weight.data, std=0.001)
@@ -313,18 +320,22 @@ class build_transformer(nn.Module):
             image_features_proj             # [B,L,C]
         )
         cross_feat = cross_x.squeeze(1)  # [B,C]
-        cross_x_bn = self.bottleneck_proj(cross_feat)   
-        cls_score = self.classifier_proj(cross_x_bn).float()
+        cross_x_bn = self.bottleneck_proj_cross(cross_feat)   
+        cls_score = self.classifier_proj_cross(cross_x_bn).float()
 
         feat = self.bottleneck(img_feature)
         feat_cls_score = self.classifier(feat).float()
 
-        image_logits = self.classifier_id_bge(img_feature_proj).float()
-        text_logits = self.classifier_id_bge(text_feature).float()
+        img_feat = self.bottleneck_proj(img_feature_proj)
+        img_score = self.classifier_proj(img_feat).float()
+
+        # image_logits = self.classifier_id_bge(img_feature_proj).float()
+        # text_logits = self.classifier_id_bge(text_feature).float()
         if self.training:
             return {
-                "cls_score": [cls_score, feat_cls_score, image_logits, text_logits],                  # cho ID loss
-                "global_feat": [cross_feat, text_feature, img_feature_proj, img_feature, img_feature_last],  # cho Triplet loss
+                # "cls_score": [cls_score, feat_cls_score, image_logits, text_logits], # cho ID loss
+                "cls_score": [cls_score, feat_cls_score, img_score], # cho ID loss
+                "global_feat": [cross_feat, img_feature_proj, img_feature, img_feature_last],  # cho Triplet loss
                 "text_feat": text_feature_norm,         # cho SupCon
                 "img_feat_proj": img_feature_proj_norm  # cho SupCon
             }
@@ -337,9 +348,11 @@ class build_transformer(nn.Module):
                     return cross_feat
             elif eval_mode == 'cross_cls':
                 if dataset_flag == 'query':
-                    return cross_x_bn
+                    # return cross_x_bn
+                    return torch.cat([cross_x_bn], dim=1)
                 else:
-                    return img_feature_proj
+                    return torch.cat([img_feat], dim=1)
+
                     
     
     def load_param(self, trained_path):

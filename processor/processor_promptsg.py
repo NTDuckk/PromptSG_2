@@ -192,7 +192,9 @@ def do_train_promptsg(cfg,
                     torch.cuda.empty_cache()
             else:
                 model.eval()
+                print('Model not dist_train')
                 if eval_mode == 'clipreid':
+                    print('Eval mode: clipreid')
                     for n_iter, (img, vid, camid, camids, target_view, _) in enumerate(val_loader):
                         with torch.no_grad():
                             img = img.to(device)
@@ -214,9 +216,10 @@ def do_train_promptsg(cfg,
                         logger.info("CMC curve, Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
                     torch.cuda.empty_cache()
                 elif eval_mode == 'cross_cls':
+                    print('Eval mode: cross_cls')
                     loader1 = query_loader
                     loader2 = gallery_loader
-                    if loader_flag == 'query':
+                    if loader_flag == 'clipreid':
                         loader1 = val_loader
                         loader2 = val_loader
                     for n_iter, (img, vid, camid, camids, target_view, _) in enumerate(loader1):
