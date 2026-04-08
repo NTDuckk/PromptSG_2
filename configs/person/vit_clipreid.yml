@@ -89,8 +89,8 @@ TEST:
   WEIGHT: ''
   NECK_FEAT: 'after'
   FEAT_NORM: True
-  # EVAL_MODE: 'clipreid
-  EVAL_MODE: 'cross_cls'
+  EVAL_MODE: 'clipreid'
+  # EVAL_MODE: 'cross_cls'
 
 DATASETS:
   NAMES: ('market1501')
