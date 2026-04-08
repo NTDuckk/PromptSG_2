@@ -10,6 +10,29 @@ from .triplet_loss import TripletLoss
 from .center_loss import CenterLoss
 from .supcontrast import SupConLoss
 
+
+def compute_TAL(image_features, text_features, pid, tau=0.015, margin=0.1):
+    # # normalized features
+    image_norm = image_features / image_features.norm(dim=-1, keepdim=True)
+    text_norm = text_features / text_features.norm(dim=-1, keepdim=True)
+    scores = text_norm @ image_norm.t()
+
+    batch_size = scores.shape[0]
+    pid = pid.reshape((batch_size, 1))  # make sure pid size is [batch_size, 1]
+    pid_dist = pid - pid.t()
+    labels = (pid_dist == 0).float().cuda()
+    mask = 1 - labels
+
+    alpha_i2t = ((scores / tau).exp() * labels / ((scores / tau).exp() * labels).sum(dim=1, keepdim=True)).detach()
+    alpha_t2i = ((scores.t() / tau).exp() * labels / ((scores.t() / tau).exp() * labels).sum(dim=1,
+                                                                                             keepdim=True)).detach()
+
+    loss = (-  (alpha_i2t * scores).sum(1) + tau * ((scores / tau).exp() * mask).sum(1).clamp(max=10e35).log() + margin).clamp(min=0) \
+           + (-  (alpha_t2i * scores.t()).sum(1) + tau * ((scores.t() / tau).exp() * mask).sum(1).clamp(max=10e35).log() + margin).clamp(min=0)
+
+    return loss.sum()
+
+
 def make_loss(cfg, num_classes):    # modified by gu
     sampler = cfg.DATALOADER.SAMPLER
     feat_dim = 2048
@@ -60,7 +83,10 @@ def make_loss(cfg, num_classes):    # modified by gu
                     tri_loss = sum([triplet(f, target)[0] for f in feat])
                 else:
                     tri_loss = triplet(feat, target)[0]
-
+                    
+                TAL_loss = compute_TAL(img_feat_proj, text_feat, target)
+                tri_loss += TAL_loss
+                
                 # Symmetric SupCon
                 supcon_i2t = supcon(text_feat, img_feat_proj, target, target)
                 supcon_t2i = supcon(img_feat_proj, text_feat, target, target)

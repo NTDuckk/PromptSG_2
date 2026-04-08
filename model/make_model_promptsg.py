@@ -335,7 +335,7 @@ class build_transformer(nn.Module):
             return {
                 # "cls_score": [cls_score, feat_cls_score, image_logits, text_logits], # cho ID loss
                 "cls_score": [cls_score, feat_cls_score, img_score], # cho ID loss
-                "global_feat": [cross_feat, img_feature_proj, img_feature, img_feature_last],  # cho Triplet loss
+                "global_feat": [cross_feat, img_feature_proj, img_feature, img_feature_last, text_feature],  # cho Triplet loss
                 "text_feat": text_feature_norm,         # cho SupCon
                 "img_feat_proj": img_feature_proj_norm  # cho SupCon
             }
