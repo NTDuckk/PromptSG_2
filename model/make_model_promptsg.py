@@ -351,8 +351,8 @@ class build_transformer(nn.Module):
                     # return cross_x_bn
                     return torch.cat([cross_x_bn], dim=1)
                 else:
-                    # return torch.cat([img_feat], dim=1)
-                    return torch.cat([cross_x_bn], dim=1)
+                    return torch.cat([img_feat], dim=1)
+                    # return torch.cat([cross_x_bn], dim=1)
                     
 
     def load_param(self, trained_path):
