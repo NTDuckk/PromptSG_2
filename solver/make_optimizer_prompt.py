@@ -54,79 +54,55 @@ def make_optimizer_1stage(cfg, model):
 
 def make_optimizer_promptsg(cfg, model, center_criterion):
     params = []
-
-    base_lr = cfg.SOLVER.STAGE2.BASE_LR
-    lr_factor = cfg.SOLVER.STAGE2.LR_FACTOR
-    bias_lr_factor = cfg.SOLVER.STAGE2.BIAS_LR_FACTOR
-    weight_decay = cfg.SOLVER.STAGE2.WEIGHT_DECAY
-    weight_decay_bias = cfg.SOLVER.STAGE2.WEIGHT_DECAY_BIAS
-
+    keys = []
     for key, value in model.named_parameters():
+        # Đóng băng text_encoder và prompt_learner (không train)
+        if "text_encoder" in key:
+            value.requires_grad_(False)
+            continue   
+        if "prompt_learner" in key:
+            value.requires_grad_(False)
+            continue
+        # Bỏ qua các head text riêng nếu có
+        if "classifier_id_bge" in key:
+            continue
+        # Nếu parameter đã bị đóng băng từ trước thì bỏ qua
         if not value.requires_grad:
             continue
 
-        # text encoder frozen
-        if "text_encoder" in key:
-            continue
+        # LR mặc định từ config STAGE2
+        lr = cfg.SOLVER.STAGE2.BASE_LR
+        weight_decay = cfg.SOLVER.STAGE2.WEIGHT_DECAY
 
-        # default: all non-image_encoder params use large lr
-        if "image_encoder" in key:
-            lr = base_lr
-            lr_role = "image_encoder"
-        else:
-            lr = base_lr * lr_factor
-            lr_role = "other"
-
-        wd = weight_decay
-
-        # bias params: base_lr * bias_factor
-        # note: image_encoder bias will still be overridden later by the custom scheduler
+        # Xử lý bias riêng
         if "bias" in key:
-            lr = base_lr * bias_lr_factor
-            wd = weight_decay_bias
+            lr = cfg.SOLVER.STAGE2.BASE_LR * cfg.SOLVER.STAGE2.BIAS_LR_FACTOR
+            weight_decay = cfg.SOLVER.STAGE2.WEIGHT_DECAY_BIAS
 
-        params.append({
-            "params": [value],
-            "lr": lr,
-            "weight_decay": wd,
-            "name": key,
-            "lr_role": lr_role,
-        })
+        # Nếu bật LARGE_FC_LR, tăng LR cho các head classifier
+        if cfg.SOLVER.STAGE2.get("LARGE_FC_LR", False):
+            if "classifier" in key or "arcface" in key:
+                lr = cfg.SOLVER.STAGE2.BASE_LR * 2
+                print('Using two times learning rate for fc')
 
+        params += [{"params": [value], "lr": lr, "weight_decay": weight_decay}]
+        keys += [key]
+
+    print("Stage2 trainable params:")
+    for key in keys:
+        print("  ", key)
+
+    # Tạo optimizer theo tên được cấu hình
     opt_name = cfg.SOLVER.STAGE2.OPTIMIZER_NAME
-    if opt_name == "SGD":
-        optimizer = torch.optim.SGD(
-            params,
-            lr=base_lr,
-            momentum=getattr(cfg.SOLVER.STAGE2, "MOMENTUM", 0.9),
-        )
-    elif opt_name == "Adam":
-        optimizer = torch.optim.Adam(
-            params,
-            lr=base_lr,
-            betas=(
-                getattr(cfg.SOLVER.STAGE2, "ALPHA", 0.9),
-                getattr(cfg.SOLVER.STAGE2, "BETA", 0.999),
-            ),
-            eps=1e-3,
-        )
-    elif opt_name == "AdamW":
-        optimizer = torch.optim.AdamW(
-            params,
-            lr=base_lr,
-            betas=(
-                getattr(cfg.SOLVER.STAGE2, "ALPHA", 0.9),
-                getattr(cfg.SOLVER.STAGE2, "BETA", 0.999),
-            ),
-            eps=1e-8,
-        )
+    if opt_name == 'SGD':
+        optimizer = torch.optim.SGD(params, momentum=cfg.SOLVER.STAGE2.MOMENTUM)
+    elif opt_name == 'AdamW':
+        optimizer = torch.optim.AdamW(params, lr=cfg.SOLVER.STAGE2.BASE_LR, weight_decay=cfg.SOLVER.STAGE2.WEIGHT_DECAY)
     else:
-        raise NotImplementedError(f"Unsupported optimizer: {opt_name}")
+        optimizer = getattr(torch.optim, opt_name)(params)
 
-    optimizer_center = torch.optim.SGD(
-        center_criterion.parameters(),
-        lr=getattr(cfg.SOLVER.STAGE2, "CENTER_LR", 0.5),
-    )
+    optimizer_center = torch.optim.SGD(center_criterion.parameters(), lr=cfg.SOLVER.STAGE2.CENTER_LR)
+
 
     return optimizer, optimizer_center
 
