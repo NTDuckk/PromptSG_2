@@ -219,7 +219,7 @@ def do_train_promptsg(cfg,
                     print('Eval mode: cross_cls')
                     loader1 = query_loader
                     loader2 = gallery_loader
-                    if loader_flag != None:
+                    if loader_flag == None:
                         loader1 = val_loader
                         loader2 = val_loader
                     for n_iter, (img, vid, camid, camids, target_view, _) in enumerate(loader1):
