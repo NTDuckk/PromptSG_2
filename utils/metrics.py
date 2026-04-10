@@ -279,7 +279,7 @@ class R1_mAP_eval():
 
         sims = qf @ gf.t()   # cosine similarity (already normalized)
 
-        cmc, mAP, mINP, indices = eval_func_rank_with_cam(
+        cmc, mAP, mINP, indices = eval_func_rank(
             similarity=sims,
             q_pids=q_pids,
             g_pids=g_pids,
