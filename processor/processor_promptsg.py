@@ -208,7 +208,8 @@ def do_train_promptsg(cfg,
                                 target_view = None
                             feat = model(img, cam_label=camids, view_label=target_view, eval_mode = eval_mode)
                             evaluator.update((feat, vid, camid))
-                    cmc, mAP, _, _, _, _, _ = evaluator.compute()
+                    # cmc, mAP, _, _, _, _, _ = evaluator.compute()
+                    cmc, mAP, _, _, _, _, _ = evaluator.compute1()
                     logger.info("Validation Results - Epoch: {}".format(epoch))
                     logger.info("mAP: {:.1%}".format(mAP))
                     for r in [1, 5, 10]:

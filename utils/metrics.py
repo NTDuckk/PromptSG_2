@@ -86,70 +86,88 @@ def eval_func(distmat, q_pids, g_pids, q_camids, g_camids, max_rank=50):
 
     return all_cmc, mAP
 
-def eval_func_rank(similarity, q_pids, g_pids, max_rank=10, get_mAP=True):
+def eval_func_rank(similarity, q_pids, g_pids, q_camids, g_camids, max_rank=50, get_mAP=True):
     """
-    Rank evaluation directly from similarity matrix.
-    Returns metrics in percentage scale: 0..100
+    Evaluate with camera view filtering, using similarity matrix (larger = more similar).
+    Returns:
+        cmc (0..100), mAP (0..100), mINP (0..100), indices (list of tensors for valid queries)
     """
     if not torch.is_tensor(similarity):
         similarity = torch.tensor(similarity)
-
     similarity = similarity.detach().cpu()
+    q_pids = torch.tensor(q_pids, dtype=torch.long) if not torch.is_tensor(q_pids) else q_pids.detach().cpu().long()
+    g_pids = torch.tensor(g_pids, dtype=torch.long) if not torch.is_tensor(g_pids) else g_pids.detach().cpu().long()
+    q_camids = torch.tensor(q_camids, dtype=torch.long) if not torch.is_tensor(q_camids) else q_camids.detach().cpu().long()
+    g_camids = torch.tensor(g_camids, dtype=torch.long) if not torch.is_tensor(g_camids) else g_camids.detach().cpu().long()
 
-    if not torch.is_tensor(q_pids):
-        q_pids = torch.tensor(q_pids, dtype=torch.long)
-    else:
-        q_pids = q_pids.detach().cpu().long()
+    num_q, num_g = similarity.shape
+    if num_g < max_rank:
+        max_rank = num_g
+        print("Note: number of gallery samples is quite small, got {}".format(num_g))
 
-    if not torch.is_tensor(g_pids):
-        g_pids = torch.tensor(g_pids, dtype=torch.long)
-    else:
-        g_pids = g_pids.detach().cpu().long()
+    # Sort descending because larger similarity = better
+    indices = torch.argsort(similarity, dim=1, descending=True)  # (num_q, num_g)
 
-    max_rank = min(max_rank, similarity.size(1))
+    all_cmc = []
+    all_AP = []
+    all_matches = []
+    all_valid_indices = []
+    num_valid_q = 0
 
-    if get_mAP:
-        indices = torch.argsort(similarity, dim=1, descending=True)
-    else:
-        _, indices = torch.topk(
-            similarity, k=max_rank, dim=1, largest=True, sorted=True
-        )
+    for q_idx in range(num_q):
+        q_pid = q_pids[q_idx].item()
+        q_camid = q_camids[q_idx].item()
+        order = indices[q_idx]  # (num_g,)
 
-    pred_labels = g_pids[indices]
-    matches = pred_labels.eq(q_pids.view(-1, 1))
+        # Remove gallery samples with same pid and same camid
+        remove = (g_pids[order] == q_pid) & (g_camids[order] == q_camid)
+        keep = ~remove
+        order_keep = order[keep]
 
-    all_cmc = matches[:, :max_rank].cumsum(1)
-    all_cmc[all_cmc > 1] = 1
-    all_cmc = all_cmc.float().mean(0) * 100.0
+        # Binary matches after filtering
+        matches = (g_pids[order_keep] == q_pid).byte()
+        if matches.sum() == 0:
+            continue
+
+        num_valid_q += 1
+
+        # CMC
+        cmc = matches.cumsum(dim=0)
+        cmc = (cmc > 0).float()
+        all_cmc.append(cmc[:max_rank])
+
+        # AP
+        num_rel = matches.sum().float()
+        tmp_cmc = matches.cumsum(dim=0).float()
+        y = torch.arange(1, len(tmp_cmc) + 1, dtype=torch.float32)
+        precision = tmp_cmc / y
+        AP = (precision * matches.float()).sum() / num_rel
+        all_AP.append(AP.item())
+
+        all_matches.append(matches)
+        all_valid_indices.append(order_keep)
+
+    assert num_valid_q > 0, "No valid query"
+
+    cmc = torch.stack(all_cmc).float().mean(dim=0) * 100.0   # to percentage
+    mAP = np.mean(all_AP) * 100.0
 
     if not get_mAP:
-        return all_cmc, indices
+        return cmc, None, None, None
 
-    num_rel = matches.sum(1)
-    valid = num_rel > 0
-    assert valid.any(), "Error: all query identities do not appear in gallery"
+    # mINP: mean Inverse Negative Penalty
+    inp_list = []
+    for matches in all_matches:
+        pos_idx = torch.nonzero(matches, as_tuple=False).squeeze(1)
+        if pos_idx.numel() == 0:
+            continue
+        last_pos = pos_idx[-1].item()
+        tmp_cmc = matches.cumsum(dim=0).float()
+        inp = tmp_cmc[last_pos] / (last_pos + 1.0)
+        inp_list.append(inp)
+    mINP = torch.stack(inp_list).mean().item() * 100.0 if inp_list else 0.0
 
-    matches = matches[valid]
-    num_rel = num_rel[valid]
-    indices = indices[valid]
-
-    tmp_cmc = matches.cumsum(1)
-
-    inp = []
-    for i, match_row in enumerate(matches):
-        pos_idx = torch.nonzero(match_row, as_tuple=False).squeeze(1)
-        last_pos = pos_idx[-1]
-        inp.append(tmp_cmc[i, last_pos].float() / (last_pos.float() + 1.0))
-    mINP = torch.stack(inp).mean() * 100.0
-
-    precision = tmp_cmc.float() / torch.arange(
-        1, tmp_cmc.shape[1] + 1, dtype=torch.float32
-    ).unsqueeze(0)
-    AP = (precision * matches.float()).sum(1) / num_rel.float()
-    mAP = AP.mean() * 100.0
-
-    return all_cmc, mAP, mINP, indices
-
+    return cmc, mAP, mINP, all_valid_indices
 
 def rank(similarity, q_pids, g_pids, max_rank=10, get_mAP=True):
     return eval_func_rank(
@@ -215,6 +233,35 @@ class R1_mAP_eval():
 
         return cmc, mAP, distmat, self.pids, self.camids, qf, gf
 
+    def compute1(self):  # called after each epoch - using cosine distance
+        feats = torch.cat(self.feats, dim=0)
+        if self.feat_norm:
+            print("The test feature is normalized")
+            feats = torch.nn.functional.normalize(feats, dim=1, p=2)  # along channel
+        # query
+        qf = feats[:self.num_query]
+        q_pids = np.asarray(self.pids[:self.num_query])
+        q_camids = np.asarray(self.camids[:self.num_query])
+        # gallery
+        gf = feats[self.num_query:]
+        g_pids = np.asarray(self.pids[self.num_query:])
+        g_camids = np.asarray(self.camids[self.num_query:])
+        
+        if self.reranking:
+            print('=> Enter reranking')
+            # re_ranking vẫn dùng feature gốc (không phải distance) nên giữ nguyên
+            distmat = re_ranking(qf, gf, k1=50, k2=15, lambda_value=0.3)
+        else:
+            print('=> Computing DistMat with cosine distance (1 - similarity)')
+            # Vì qf và gf đã được chuẩn hóa L2, cosine similarity = qf @ gf.t()
+            sim = qf.mm(gf.t())  # shape (num_query, num_gallery)
+            # Chuyển similarity thành khoảng cách (càng nhỏ càng giống)
+            distmat = 1 - sim
+            distmat = distmat.cpu().numpy()
+        
+        cmc, mAP = eval_func(distmat, q_pids, g_pids, q_camids, g_camids)
+        return cmc, mAP, distmat, self.pids, self.camids, qf, gf
+
     def compute_cross_cls(self):
         feats = torch.cat(self.feats, dim=0)
         feats_gallery = torch.cat(self.feats_gallery, dim=0)
@@ -222,22 +269,22 @@ class R1_mAP_eval():
             print("The test feature is normalized")
             feats = torch.nn.functional.normalize(feats, p=2, dim=1)
             feats_gallery = torch.nn.functional.normalize(feats_gallery, p=2, dim=1)
-        
-        # query
+
         qf = feats
         q_pids = np.asarray(self.pids)
         q_camids = np.asarray(self.camids)
-        # gallery
         gf = feats_gallery
         g_pids = np.asarray(self.pids_gallery)
         g_camids = np.asarray(self.camids_gallery)
-        
-        sims = qf @ gf.t()
-        
-        cmc, mAP, mINP, indices = eval_func_rank(
+
+        sims = qf @ gf.t()   # cosine similarity (already normalized)
+
+        cmc, mAP, mINP, indices = eval_func_rank_with_cam(
             similarity=sims,
             q_pids=q_pids,
             g_pids=g_pids,
+            q_camids=q_camids,
+            g_camids=g_camids,
             max_rank=self.max_rank,
             get_mAP=True
         )
