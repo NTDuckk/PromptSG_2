@@ -331,10 +331,11 @@ class build_transformer(nn.Module):
 
         # image_logits = self.classifier_id_bge(img_feature_proj).float()
         # text_logits = self.classifier_id_bge(text_feature).float()
+        text_score = self.classifier_proj(text_feature).float()
         if self.training:
             return {
                 # "cls_score": [cls_score, feat_cls_score, image_logits, text_logits], # cho ID loss
-                "cls_score": [cls_score, feat_cls_score, img_score], # cho ID loss
+                "cls_score": [cls_score, feat_cls_score, img_score, text_score], # cho ID loss
                 "global_feat": [cross_feat, img_feature_proj, img_feature, img_feature_last, text_feature],  # cho Triplet loss
                 "text_feat": text_feature_norm,         # cho SupCon
                 "img_feat_proj": img_feature_proj_norm  # cho SupCon
