@@ -41,15 +41,13 @@ class IM2TEXT(nn.Module):
         layers = []
         dim = embed_dim
         for _ in range(n_layer):
-            block = [
-                nn.Linear(dim, middle_dim),
-                nn.Dropout(dropout),
-                nn.ReLU(inplace=True),
-            ]
+            block = []
+            block.append(nn.Linear(dim, middle_dim))
+            block.append(nn.Dropout(dropout))
+            block.append(nn.ReLU())
             dim = middle_dim
             layers.append(nn.Sequential(*block))
         self.layers = nn.Sequential(*layers)
-
     def forward(self, x: torch.Tensor):
         for layer in self.layers:
             x = layer(x)
@@ -217,7 +215,7 @@ class build_transformer(nn.Module):
             embed_dim=self.embed_dim,
             middle_dim=512,
             output_dim=512 if self.embed_dim == 512 else self.embed_dim,
-            n_layer=2
+            n_layer=3
         )
 
         # cross-attn + transformer (PromptSG MIM)
@@ -336,7 +334,7 @@ class build_transformer(nn.Module):
             return {
                 # "cls_score": [cls_score, feat_cls_score, image_logits, text_logits], # cho ID loss
                 "cls_score": [cls_score, feat_cls_score, img_score, text_score], # cho ID loss
-                "global_feat": [cross_feat, img_feature_proj, img_feature, img_feature_last, text_feature],  # cho Triplet loss
+                "global_feat": [cross_feat, img_feature_proj, img_feature, img_feature_last, text_feature_norm],  # cho Triplet loss
                 "text_feat": text_feature_norm,         # cho SupCon
                 "img_feat_proj": img_feature_proj_norm  # cho SupCon
             }
