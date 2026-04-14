@@ -92,14 +92,14 @@ TEST:
   WEIGHT: ''
   NECK_FEAT: 'after'
   FEAT_NORM: True
-  # EVAL_MODE: 'clipreid'
-  EVAL_MODE: 'cross_cls'
+  EVAL_MODE: 'clipreid'
+  # EVAL_MODE: 'cross_cls'
 
 DATASETS:
   NAMES: ('market1501')
   ROOT_DIR: ('datasets/dataset')
-  DATASET_FLAG: 'query'
-  # DATASET_FLAG: 'clipreid'
+  # DATASET_FLAG: 'query'
+  DATASET_FLAG: 'clipreid'
 OUTPUT_DIR: 'vit_clipreid_market1501/logs'
 
 #   NAMES: ('dukemtmc')
