@@ -83,8 +83,9 @@ def make_loss(cfg, num_classes):    # modified by gu
                     tri_loss = sum([triplet(f, target)[0] for f in feat])
                 else:
                     tri_loss = triplet(feat, target)[0]
-                    
-                TAL_loss = compute_TAL(img_feat_proj, text_feat, target)
+                
+                cross_feat = feat[0]
+                TAL_loss = compute_TAL(cross_feat, img_feat_proj, target)
                 tri_loss += TAL_loss
                 
                 # Symmetric SupCon

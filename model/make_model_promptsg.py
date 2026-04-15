@@ -296,9 +296,9 @@ class build_transformer(nn.Module):
 
             image_features_last, image_features, image_features_proj = self.image_encoder(x, cv_embed)
             # image_feats_proj = image_features_proj  # [B,L,C]
-            img_feature_last = image_features_last[:, 0]
-            img_feature = image_features[:, 0]
-            img_feature_proj = image_features_proj[:, 0]
+            img_feature_last = image_features_last[:, 0, :].float()
+            img_feature = image_features[:, 0, :].float()
+            img_feature_proj = image_features_proj[:, 0, :].float()
 
         # PromptSG: invert global visual embedding -> pseudo token
         token_features = self.img2text(img_feature_proj)
@@ -334,9 +334,9 @@ class build_transformer(nn.Module):
             return {
                 # "cls_score": [cls_score, feat_cls_score, image_logits, text_logits], # cho ID loss
                 "cls_score": [cls_score, feat_cls_score, img_score, text_score], # cho ID loss
-                "global_feat": [cross_feat, img_feature_proj, img_feature, img_feature_last, text_feature_norm],  # cho Triplet loss
-                "text_feat": text_feature_norm,         # cho SupCon
-                "img_feat_proj": img_feature_proj_norm  # cho SupCon
+                "global_feat": [cross_feat, img_feature_proj, img_feature, img_feature_last, text_feature],  # cho Triplet loss
+                "text_feat": text_feature,         # cho SupCon
+                "img_feat_proj": img_feature_proj  # cho SupCon
             }
         else:
             if eval_mode == 'clipreid':
